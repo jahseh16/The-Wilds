@@ -46,7 +46,7 @@ class ChunkManager(
   val islandRadius: Float = DEFAULT_ISLAND_RADIUS,
   seed: Int = IslandTerrain.DEFAULT_SEED,
   val voxelSize: Float = 1.0f,
-  val seaLevel: Float = 0f
+  val seaLevel: Float = SEA_LEVEL
 ) : Disposable {
 
   // World grid: island plus a shoreline margin of open sea floor, rounded up to whole chunks
@@ -106,6 +106,11 @@ class ChunkManager(
   private val cornerNormalsY = FloatArray(8)
   private val cornerNormalsZ = FloatArray(8)
   private val edgeVertexIndices = ShortArray(12)
+
+  // Sky exposure of every grid point of the chunk being meshed, including the +X / +Z border
+  // columns that belong to the neighbours: index = (lz * (SIZE_X + 1) + lx) * GRID_Y + gy
+  private val skyExposure = FloatArray((Chunk.SIZE_X + 1) * (Chunk.SIZE_Z + 1) * Chunk.GRID_Y)
+  private val cornerSky = FloatArray(8)
 
   private val scratchVertexBuffer = FloatArray(Chunk.MAX_SLICE_VERTICES * Chunk.VERTEX_FLOATS)
   private val scratchIndexBuffer = ShortArray(Chunk.MAX_SLICE_INDICES)
@@ -312,6 +317,46 @@ class ChunkManager(
     }
   }
 
+  // --- Sky exposure ---------------------------------------------------------------------------
+
+  /**
+   * One downward sweep per grid column of the chunk (plus its +X/+Z border columns) so the mesher
+   * can attach an exposure to every vertex. It only reads the column itself, so an edit can change
+   * it only for the columns it touches, which the existing dirty-range logic already covers.
+   */
+  private fun computeSkyExposure(baseGx: Int, baseGz: Int) {
+    for (lz in 0..Chunk.SIZE_Z) {
+      val gz = baseGz + lz
+      for (lx in 0..Chunk.SIZE_X) {
+        val gx = baseGx + lx
+        SkyExposure.fillColumn(
+          skyExposure, (lz * (Chunk.SIZE_X + 1) + lx) * Chunk.GRID_Y, cellsY, voxelSize
+        ) { gy -> gridDensity(gx, gy, gz) }
+      }
+    }
+  }
+
+  private fun skyAt(lx: Int, gy: Int, lz: Int): Float =
+    skyExposure[(lz * (Chunk.SIZE_X + 1) + lx) * Chunk.GRID_Y + gy]
+
+  /**
+   * Sky exposure at a world position, 1.0 under open sky and ~0.0 deep underground. Same model the
+   * mesher bakes into the vertices (vertical cover only), handy for gameplay such as "am I in a cave".
+   */
+  fun skyExposureAt(x: Float, y: Float, z: Float): Float {
+    val step = voxelSize * 0.5f
+    var cover = 0f
+    var py = y + step
+    while (py < maxY && cover < SkyExposure.COVER_CUTOFF) {
+      cover += getDensityAt(x, py, z).coerceIn(0f, 1f) * step
+      py += step
+    }
+    return SkyExposure.exposureForCover(cover)
+  }
+
+  /** Height of the original, unedited terrain (what the sea floor and beaches looked like at the start). */
+  fun baseTerrainHeightAt(x: Float, z: Float): Float = terrain.heightAt(x, z)
+
   // --- Meshing -------------------------------------------------------------------------------
 
   /**
@@ -322,6 +367,7 @@ class ChunkManager(
   private fun rebuildChunk(chunk: Chunk) {
     val baseGx = chunk.cx * Chunk.SIZE_X
     val baseGz = chunk.cz * Chunk.SIZE_Z
+    computeSkyExposure(baseGx, baseGz)
 
     var vertCount = 0
     var idxCount = 0
@@ -391,6 +437,15 @@ class ChunkManager(
           cornerPositionsX[6] = wx1; cornerPositionsY[6] = wy1; cornerPositionsZ[6] = wz1
           cornerPositionsX[7] = wx0; cornerPositionsY[7] = wy1; cornerPositionsZ[7] = wz1
 
+          cornerSky[0] = skyAt(lx, gy, lz)
+          cornerSky[1] = skyAt(lx + 1, gy, lz)
+          cornerSky[2] = skyAt(lx + 1, gy, lz + 1)
+          cornerSky[3] = skyAt(lx, gy, lz + 1)
+          cornerSky[4] = skyAt(lx, gy + 1, lz)
+          cornerSky[5] = skyAt(lx + 1, gy + 1, lz)
+          cornerSky[6] = skyAt(lx + 1, gy + 1, lz + 1)
+          cornerSky[7] = skyAt(lx, gy + 1, lz + 1)
+
           computeGridGradientNormal(gx, gy, gz, 0)
           computeGridGradientNormal(gx + 1, gy, gz, 1)
           computeGridGradientNormal(gx + 1, gy, gz + 1, 2)
@@ -437,6 +492,7 @@ class ChunkManager(
               scratchVertexBuffer[base + 3] = nx
               scratchVertexBuffer[base + 4] = ny
               scratchVertexBuffer[base + 5] = nz
+              scratchVertexBuffer[base + 6] = cornerSky[c0] + t * (cornerSky[c1] - cornerSky[c0])
 
               if (px < boundMinX) boundMinX = px
               if (py < boundMinY) boundMinY = py
@@ -811,6 +867,9 @@ class ChunkManager(
     /** Default synchronous window (in chunks around the spawn) for [prewarm]. */
     const val PREWARM_RADIUS_CHUNKS = 1
     const val ISO_LEVEL = VoxelVolumeMesh.ISO_LEVEL
+
+    /** World Y of the sea surface; the island fades to the sea floor below it. */
+    const val SEA_LEVEL = 0f
 
     /** Open sea floor kept around the island, in metres, before rounding up to whole chunks. */
     private const val WORLD_MARGIN = 8f

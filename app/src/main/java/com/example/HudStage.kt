@@ -90,8 +90,26 @@ class HudStage(
     ringThickness = 4
   )
 
+  private val phaseUpTexture: Texture = createPillTexture(
+    width = PHASE_BUTTON_WIDTH.toInt(),
+    height = PHASE_BUTTON_HEIGHT.toInt(),
+    fillColor = Color(0.06f, 0.09f, 0.13f, 0.50f),
+    ringColor = Color(0.80f, 0.86f, 0.95f, 0.70f)
+  )
+
+  private val phaseDownTexture: Texture = createPillTexture(
+    width = PHASE_BUTTON_WIDTH.toInt(),
+    height = PHASE_BUTTON_HEIGHT.toInt(),
+    fillColor = Color(0.30f, 0.38f, 0.52f, 0.80f),
+    ringColor = Color(0.95f, 0.98f, 1.0f, 0.95f)
+  )
+
   private val buttonFont: BitmapFont = BitmapFont().apply {
     data.setScale(1.32f)
+  }
+
+  private val phaseFont: BitmapFont = BitmapFont().apply {
+    data.setScale(1.05f)
   }
 
   private val lightOffDrawable = TextureRegionDrawable(TextureRegion(lightOffTexture))
@@ -106,6 +124,11 @@ class HudStage(
   private val digButton: TextButton
   private val lightButton: TextButton
   private val lightButtonStyle: TextButton.TextButtonStyle
+  private val phaseButton: TextButton
+  private var shownPhaseLabel: String = ""
+
+  @Volatile
+  private var phaseSkipRequested: Boolean = false
 
   @Volatile
   private var jumpRequested: Boolean = false
@@ -302,6 +325,54 @@ class HudStage(
       add(rightActionsTable).right().bottom()
     }
     addActor(rootTable)
+
+    // Day phase button: small pill centred at the top edge, well clear of the joystick and the
+    // action buttons. Tapping it asks the game to jump to the next phase (see consumePhaseSkipRequest)
+    val phaseButtonStyle = TextButton.TextButtonStyle(
+      TextureRegionDrawable(TextureRegion(phaseUpTexture)),
+      TextureRegionDrawable(TextureRegion(phaseDownTexture)),
+      null,
+      phaseFont
+    ).apply {
+      fontColor = Color(0.92f, 0.95f, 1f, 1f)
+      downFontColor = Color.WHITE
+    }
+
+    phaseButton = TextButton("", phaseButtonStyle).apply {
+      addListener(object : InputListener() {
+        override fun touchDown(
+          event: InputEvent?,
+          x: Float,
+          y: Float,
+          pointer: Int,
+          button: Int
+        ): Boolean {
+          phaseSkipRequested = true
+          return true
+        }
+      })
+    }
+
+    val topTable = Table().apply {
+      setFillParent(true)
+      top()
+      pad(14f)
+      add(phaseButton).size(PHASE_BUTTON_WIDTH, PHASE_BUTTON_HEIGHT).top()
+    }
+    addActor(topTable)
+  }
+
+  /** Shows the current day phase on the top button (cheap to call every frame). */
+  fun setPhaseLabel(label: String) {
+    if (label == shownPhaseLabel) return
+    shownPhaseLabel = label
+    phaseButton.setText(label)
+  }
+
+  fun consumePhaseSkipRequest(): Boolean {
+    if (!phaseSkipRequested) return false
+    phaseSkipRequested = false
+    return true
   }
 
   private fun updateLightButtonVisuals() {
@@ -341,8 +412,37 @@ class HudStage(
     digDownTexture.dispose()
     lightOffTexture.dispose()
     lightOnTexture.dispose()
+    phaseUpTexture.dispose()
+    phaseDownTexture.dispose()
     buttonFont.dispose()
+    phaseFont.dispose()
     super.dispose()
+  }
+
+  /** Rounded "pill" button background: a ring-coloured pill with a translucent pill inset inside it. */
+  private fun createPillTexture(width: Int, height: Int, fillColor: Color, ringColor: Color): Texture {
+    val pixmap = Pixmap(width, height, Pixmap.Format.RGBA8888)
+
+    fun pill(inset: Int) {
+      val radius = height / 2 - inset
+      val cy = height / 2
+      val leftCx = height / 2
+      val rightCx = width - height / 2 - 1
+      pixmap.fillCircle(leftCx, cy, radius)
+      pixmap.fillCircle(rightCx, cy, radius)
+      pixmap.fillRectangle(leftCx, inset, rightCx - leftCx, height - 2 * inset)
+    }
+
+    pixmap.setColor(ringColor)
+    pill(inset = 1)
+    pixmap.setBlending(Pixmap.Blending.None) // replace the ring's interior instead of blending over it
+    pixmap.setColor(fillColor)
+    pill(inset = 4)
+
+    return Texture(pixmap).apply {
+      setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+      pixmap.dispose()
+    }
   }
 
   private fun createRingTexture(
@@ -392,5 +492,7 @@ class HudStage(
     const val CRAWL_BUTTON_SIZE = 114f
     const val DIG_BUTTON_SIZE = 116f
     const val LIGHT_BUTTON_SIZE = 100f
+    const val PHASE_BUTTON_WIDTH = 190f
+    const val PHASE_BUTTON_HEIGHT = 46f
   }
 }

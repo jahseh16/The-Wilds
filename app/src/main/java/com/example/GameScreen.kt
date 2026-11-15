@@ -37,8 +37,12 @@ class GameScreen : Screen {
     )
   )
   private val environment: Environment
+  private val sunLight: DirectionalLight = DirectionalLight()
+  private val dayNight = DayNightCycle()
+  private val soundManager = SoundManager()
   private val flashlight: SpotLight
   private val chunkManager: ChunkManager
+  private val oceanRenderer: OceanRenderer
   private val hudStage: HudStage
 
   // Anti-pixelation terrain textures (diffuse + normal maps) & tri-planar shader
@@ -91,6 +95,7 @@ class GameScreen : Screen {
     // Load the chunks around the spawn now so the ground is there on frame 1; the rest of the
     // streaming radius fills in one chunk per frame from render()
     chunkManager.prewarm(spawn)
+    oceanRenderer = OceanRenderer(chunkManager)
 
     flashlight = SpotLight().apply {
       set(
@@ -103,11 +108,15 @@ class GameScreen : Screen {
       )
     }
 
+    // Ambient, fog and the sun are driven every frame by DayNightCycle (initial values are
+    // overwritten right below, the attributes just have to exist)
     environment = Environment().apply {
       set(ColorAttribute.createAmbientLight(0.5f, 0.5f, 0.5f, 1f))
-      add(DirectionalLight().set(0.95f, 0.95f, 0.90f, -0.5f, -1f, -0.3f))
+      set(ColorAttribute.createFog(0.62f, 0.76f, 0.90f, 1f))
+      add(sunLight)
       add(flashlight)
     }
+    dayNight.applyTo(environment, sunLight)
 
     camera = PerspectiveCamera(
       FIELD_OF_VIEW,
@@ -154,6 +163,7 @@ class GameScreen : Screen {
 
   override fun show() {
     Gdx.input.inputProcessor = hudStage.inputProcessor
+    soundManager.resumeAmbient()
   }
 
   override fun render(delta: Float) {
@@ -163,14 +173,27 @@ class GameScreen : Screen {
     streamingPos.set(playerX, playerFeetY, playerZ)
     chunkManager.update(streamingPos, dt)
 
+    // Day/night: advance the clock (the HUD pill can jump to the next phase), then push sky,
+    // fog, ambient and sun into the environment and the terrain shader
+    if (hudStage.consumePhaseSkipRequest()) {
+      dayNight.skipToNextPhase()
+    }
+    dayNight.update(dt)
+    dayNight.applyTo(environment, sunLight)
+    terrainShader.fogDensity = dayNight.fogDensity
+    hudStage.setPhaseLabel(dayNight.phase.label)
+
     updatePlayerPhysics(dt)
+    val walkingOnGround = (hudStage.moveX != 0f || hudStage.moveY != 0f) && isGrounded
+    soundManager.update(dt, walkingOnGround, isActuallyCrawling)
     camera.update()
+    oceanRenderer.update(dt, camera.position, dayNight.fogDensity, camera.far, dayNight.skyColor)
     updateFlashlight()
     updateAimAndExcavation(dt)
     updateShovelViewmodel(dt)
 
     Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
-    Gdx.gl.glClearColor(0.45f, 0.65f, 0.85f, 1f)
+    Gdx.gl.glClearColor(dayNight.skyColor.r, dayNight.skyColor.g, dayNight.skyColor.b, 1f)
     Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)
 
     // Render 3D world with tri-planar normal-mapped shader & ground aim ring;
@@ -180,6 +203,8 @@ class GameScreen : Screen {
     if (hasAimHit) {
       modelBatch.render(chunkManager.aimIndicatorInstance)
     }
+    // The sea blends over the terrain, so ModelBatch draws it after every opaque renderable
+    oceanRenderer.render(modelBatch, environment)
     modelBatch.end()
 
     // Clear only depth buffer so the 3D shovel viewmodel never clips into tunnel walls
@@ -433,6 +458,7 @@ class GameScreen : Screen {
           radius = DIG_SPHERE_RADIUS,
           strength = DIG_SPHERE_STRENGTH
         )
+        soundManager.playDig()
 
         if (isGrounded && !isSolidFeet(playerX, playerFeetY - 0.15f, playerZ)) {
           isGrounded = false
@@ -572,11 +598,16 @@ class GameScreen : Screen {
     hudStage.resize(width, height)
   }
 
-  override fun pause() = Unit
+  override fun pause() {
+    soundManager.pauseAmbient()
+  }
 
-  override fun resume() = Unit
+  override fun resume() {
+    soundManager.resumeAmbient()
+  }
 
   override fun hide() {
+    soundManager.pauseAmbient()
     if (Gdx.input.inputProcessor == hudStage.inputProcessor) {
       Gdx.input.inputProcessor = null
     }
@@ -585,6 +616,7 @@ class GameScreen : Screen {
   override fun dispose() {
     modelBatch.dispose()
     terrainShader.dispose()
+    oceanRenderer.dispose()
     grassColorTex.dispose()
     grassNormalTex.dispose()
     dirtColorTex.dispose()
@@ -593,6 +625,7 @@ class GameScreen : Screen {
     rockNormalTex.dispose()
     shovelModel.dispose()
     chunkManager.dispose()
+    soundManager.dispose()
     hudStage.dispose()
   }
 

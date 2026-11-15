@@ -139,7 +139,7 @@ class Chunk(
     const val SIZE_Z = 16
     const val GRID_Y = SIZE_Y + 1
 
-    const val VERTEX_FLOATS = 6 // position (3) + normal (3)
+    const val VERTEX_FLOATS = 7 // position (3) + normal (3) + sky exposure (1)
 
     // Slice limits: vertices are addressed by 16-bit indices, so a slice never exceeds this many.
     // A cell emits at most 12 vertices / 15 indices; the mesher flushes a slice before it could overflow.
@@ -149,9 +149,13 @@ class Chunk(
     private const val MIN_SLICE_INDICES = 1024
     private const val BOUNDS_PADDING = 0.05f
 
+    const val SKY_EXPOSURE_ALIAS = "a_skyOcclusion"
+
     private val ATTRIBUTES = VertexAttributes(
       VertexAttribute.Position(),
-      VertexAttribute.Normal()
+      VertexAttribute.Normal(),
+      // 1.0 = open sky, 0.0 = buried; read by TerrainShader to darken caves (see SkyExposure)
+      VertexAttribute(VertexAttributes.Usage.Generic, 1, SKY_EXPOSURE_ALIAS)
     )
 
     fun index(lx: Int, gy: Int, lz: Int): Int = (gy * SIZE_Z + lz) * SIZE_X + lx

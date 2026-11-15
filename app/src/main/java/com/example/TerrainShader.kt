@@ -45,6 +45,9 @@ class TerrainShader(
   private var uDirLightColorLoc = -1
   private var uDirLightDirLoc = -1
 
+  private var uFogColorLoc = -1
+  private var uFogDensityLoc = -1
+
   private var uSpotLightColorLoc = -1
   private var uSpotLightPosLoc = -1
   private var uSpotLightDirLoc = -1
@@ -52,6 +55,13 @@ class TerrainShader(
   private var uSpotLightCutoffLoc = -1
 
   private val tmpDir = Vector3()
+
+  /**
+   * Exponential-squared fog density in 1/metre (0 = no fog). The fog COLOUR comes from the
+   * Environment's [ColorAttribute.Fog]; the density is set by the caller each frame because libGDX
+   * has no standard attribute for it.
+   */
+  var fogDensity: Float = 0f
 
   /**
    * Trilinear mipmapping plus anisotropic filtering (when the GPU exposes it) for a terrain texture.
@@ -106,6 +116,9 @@ class TerrainShader(
     uDirLightColorLoc = program.getUniformLocation("u_dirLightColor")
     uDirLightDirLoc = program.getUniformLocation("u_dirLightDir")
 
+    uFogColorLoc = program.getUniformLocation("u_fogColor")
+    uFogDensityLoc = program.getUniformLocation("u_fogDensity")
+
     uSpotLightColorLoc = program.getUniformLocation("u_spotLightColor")
     uSpotLightPosLoc = program.getUniformLocation("u_spotLightPos")
     uSpotLightDirLoc = program.getUniformLocation("u_spotLightDir")
@@ -136,6 +149,7 @@ class TerrainShader(
 
     program.setUniformf(uUvScaleLoc, TRIPLANAR_UV_SCALE)
     program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH)
+    program.setUniformf(uFogDensityLoc, fogDensity)
   }
 
   override fun render(renderable: Renderable) {
@@ -146,6 +160,13 @@ class TerrainShader(
 
   private fun bindEnvironmentLights(renderable: Renderable) {
     val env = renderable.environment
+    val fogAttr = env?.get(ColorAttribute.Fog) as? ColorAttribute
+    if (fogAttr != null) {
+      program.setUniformf(uFogColorLoc, fogAttr.color.r, fogAttr.color.g, fogAttr.color.b)
+    } else {
+      program.setUniformf(uFogColorLoc, 0f, 0f, 0f)
+    }
+
     if (env == null) {
       program.setUniformf(uAmbientColorLoc, 0.5f, 0.5f, 0.5f)
       program.setUniformf(uDirLightColorLoc, 0f, 0f, 0f)
@@ -212,22 +233,25 @@ class TerrainShader(
   private companion object {
     const val TRIPLANAR_UV_SCALE = 0.35f
     const val NORMAL_MAP_STRENGTH = 1.25f
-    const val MAX_ANISOTROPY = 8f
+    const val MAX_ANISOTROPY = 4f
 
     private const val VERTEX_SHADER_ES30 = """#version 300 es
 in vec3 a_position;
 in vec3 a_normal;
+in float a_skyOcclusion;
 
 uniform mat4 u_projViewTrans;
 uniform mat4 u_worldTrans;
 
 out highp vec3 v_worldPos;
 out mediump vec3 v_worldNormal;
+out mediump float v_skyOcc;
 
 void main() {
     vec4 worldPos = u_worldTrans * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_worldNormal = normalize(mat3(u_worldTrans) * a_normal);
+    v_skyOcc = a_skyOcclusion;
     gl_Position = u_projViewTrans * worldPos;
 }
 """
@@ -235,17 +259,20 @@ void main() {
     private const val VERTEX_SHADER_ES20 = """#version 100
 attribute vec3 a_position;
 attribute vec3 a_normal;
+attribute float a_skyOcclusion;
 
 uniform mat4 u_projViewTrans;
 uniform mat4 u_worldTrans;
 
 varying vec3 v_worldPos;
 varying vec3 v_worldNormal;
+varying float v_skyOcc;
 
 void main() {
     vec4 worldPos = u_worldTrans * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_worldNormal = normalize(mat3(u_worldTrans) * a_normal);
+    v_skyOcc = a_skyOcclusion;
     gl_Position = u_projViewTrans * worldPos;
 }
 """
@@ -259,12 +286,12 @@ void main() {
 precision mediump float;
 #define HP highp
 #define SAMPLE(tex, uv, dx, dy) textureGrad(tex, uv, dx, dy)
-#define SAMPLE_PLAIN(tex, uv) texture(tex, uv)
 #define DFDX(v) dFdx(v)
 #define DFDY(v) dFdy(v)
 
 in highp vec3 v_worldPos;
 in mediump vec3 v_worldNormal;
+in mediump float v_skyOcc;
 out mediump vec4 fragColor;
 """
 
@@ -276,15 +303,20 @@ precision mediump float;
 #define HP mediump
 #endif
 #define SAMPLE(tex, uv, dx, dy) texture2D(tex, uv)
-#define SAMPLE_PLAIN(tex, uv) texture2D(tex, uv)
 #define DFDX(v) ((v) * 0.0)
 #define DFDY(v) ((v) * 0.0)
 #define fragColor gl_FragColor
 
 varying HP vec3 v_worldPos;
 varying mediump vec3 v_worldNormal;
+varying mediump float v_skyOcc;
 """
 
+    // Texture-read budget per fragment: at most 3 colour reads (one per active tri-planar axis, a
+    // single scale) + 1 normal-map read = 4. Typical flat ground costs 2, and beyond ~75 m the
+    // normal map is skipped. Materials are NOT blended with each other (that would double the
+    // reads): one material is picked per pixel, with a noise-wobbled border so the grass/dirt/rock
+    // edges look organic instead of following the mesh normal like a contour line.
     private const val FRAGMENT_BODY = """
 uniform HP vec3 u_cameraPos;
 
@@ -302,22 +334,23 @@ uniform mediump vec3 u_ambientColor;
 uniform mediump vec3 u_dirLightColor;
 uniform mediump vec3 u_dirLightDir;
 
+uniform mediump vec3 u_fogColor;
+uniform mediump float u_fogDensity;
+
 uniform mediump vec3 u_spotLightColor;
 uniform HP vec3 u_spotLightPos;
 uniform mediump vec3 u_spotLightDir;
 uniform mediump float u_spotLightIntensity;
 uniform mediump float u_spotLightCutoff;
 
-// Three sampling scales break the visible tiling of a single repeating texture:
-//   base  = u_uvScale            (the original look)
-//   fine  = base * FINE_SCALE    (small grain, rotated ~37 deg so its repeats never line up with base)
-//   macro = base * MACRO_SCALE   (very large blotches; drives an organic mix/brightness mask)
-const mediump float FINE_SCALE = 3.1;
-const mediump float MACRO_SCALE = 0.19;
-const mediump mat2 FINE_ROT = mat2(0.8, -0.6, 0.6, 0.8);
-// Weights fade to exactly 0 at this value (max(w - cutoff, 0)) instead of popping off, so there
-// are no hard seams where a projection axis or material layer stops contributing.
+// Axis weights fade to exactly 0 at this value (max(w - cutoff, 0)) instead of popping off, so there
+// are no hard seams where a projection axis stops contributing.
 const mediump float WEIGHT_CUTOFF = 0.05;
+// Normal mapping fades out between these camera distances (metres): far pixels are flat anyway
+const HP float NORMAL_FADE_START = 45.0;
+const HP float NORMAL_FADE_END = 75.0;
+// Ambient light that still reaches a fully buried point (the flashlight must do the work)
+const mediump float CAVE_AMBIENT_MIN = 0.05;
 
 struct Proj {
     HP vec2 uv;
@@ -334,41 +367,44 @@ Proj makeProj(HP vec2 uv) {
     return p;
 }
 
-// One projection: base-scale and fine-scale (rotated) samples mixed by fineMix
-mediump vec3 sampleBlended(sampler2D tex, Proj p, mediump float fineMix) {
-    mediump vec3 baseC = SAMPLE(tex, p.uv, p.dx, p.dy).rgb;
-    HP vec2 fineUv = FINE_ROT * p.uv * FINE_SCALE;
-    HP vec2 fineDx = FINE_ROT * p.dx * FINE_SCALE;
-    HP vec2 fineDy = FINE_ROT * p.dy * FINE_SCALE;
-    mediump vec3 fineC = SAMPLE(tex, fineUv, fineDx, fineDy).rgb;
-    return mix(baseC, fineC, fineMix);
+// Hash without sin(): stable on every GPU and free of texture reads
+HP float hash21(HP vec2 p) {
+    HP vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
-// Tri-planar colour; weights tw already sum to 1 and fade smoothly to 0
-mediump vec3 sampleMaterial(
-    sampler2D tex,
-    Proj px,
-    Proj py,
-    Proj pz,
-    mediump vec3 tw,
-    mediump float fineMix
-) {
+mediump float valueNoise(HP vec2 p) {
+    HP vec2 i = floor(p);
+    HP vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    mediump float a = hash21(i);
+    mediump float b = hash21(i + vec2(1.0, 0.0));
+    mediump float c = hash21(i + vec2(0.0, 1.0));
+    mediump float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Tri-planar colour of one material; weights tw sum to 1 and fade smoothly to 0.
+// Each active axis costs exactly one texture read.
+mediump vec3 sampleColor(sampler2D tex, Proj px, Proj py, Proj pz, mediump vec3 tw) {
     mediump vec3 col = vec3(0.0);
-    if (tw.x > 0.0) col += sampleBlended(tex, px, fineMix) * tw.x;
-    if (tw.y > 0.0) col += sampleBlended(tex, py, fineMix) * tw.y;
-    if (tw.z > 0.0) col += sampleBlended(tex, pz, fineMix) * tw.z;
+    if (tw.x > 0.0) col += SAMPLE(tex, px.uv, px.dx, px.dy).rgb * tw.x;
+    if (tw.y > 0.0) col += SAMPLE(tex, py.uv, py.dx, py.dy).rgb * tw.y;
+    if (tw.z > 0.0) col += SAMPLE(tex, pz.uv, pz.dx, pz.dy).rgb * tw.z;
     return col;
 }
 
-// Dominant-axis normal mapping: single normal texture lookup per active layer
-mediump vec3 sampleDominantNormal(
+// Dominant-axis normal mapping: a single normal-texture read, scaled by amount (0 = geometry only)
+mediump vec3 perturbNormal(
     sampler2D normTex,
     Proj dom,
     int domAxis,
-    mediump vec3 geomN
+    mediump vec3 geomN,
+    mediump float amount
 ) {
     mediump vec3 tn = SAMPLE(normTex, dom.uv, dom.dx, dom.dy).xyz * 2.0 - 1.0;
-    tn.xy *= u_normalStrength;
+    tn.xy *= u_normalStrength * amount;
     if (domAxis == 1) {
         return normalize(vec3(tn.x + geomN.x, geomN.y * tn.z, tn.y + geomN.z));
     } else if (domAxis == 0) {
@@ -378,19 +414,9 @@ mediump vec3 sampleDominantNormal(
     }
 }
 
-// Very low-frequency tri-planar noise (0..1) taken from the dirt texture. Sampled unconditionally
-// so its mip level is always well defined.
-mediump float macroMask(HP vec3 p, mediump vec3 tw) {
-    HP float s = u_uvScale * MACRO_SCALE;
-    mediump float n =
-        SAMPLE_PLAIN(u_dirtColor, p.zy * s + vec2(0.37, 0.11)).g * tw.x +
-        SAMPLE_PLAIN(u_dirtColor, p.xz * s).g * tw.y +
-        SAMPLE_PLAIN(u_dirtColor, p.xy * s + vec2(0.71, 0.53)).g * tw.z;
-    return smoothstep(0.2, 0.7, n);
-}
-
 void main() {
     mediump vec3 geomN = normalize(v_worldNormal);
+    HP float camDist = length(u_cameraPos - v_worldPos);
 
     // Tri-planar axis blend weights
     mediump vec3 blend = abs(geomN);
@@ -405,7 +431,7 @@ void main() {
     Proj projY = makeProj(v_worldPos.xz * u_uvScale);
     Proj projZ = makeProj(v_worldPos.xy * u_uvScale);
 
-    // Dominant projection axis for fast 1-sample normal mapping (0=X, 1=Y, 2=Z)
+    // Dominant projection axis for the 1-read normal mapping (0=X, 1=Y, 2=Z)
     int domAxis = 2;
     Proj dom = projZ;
     if (blend.y >= blend.x && blend.y >= blend.z) {
@@ -416,55 +442,67 @@ void main() {
         dom = projX;
     }
 
-    // Organic variation: where the macro mask is high, the fine-scale grain shows through more
-    // and the surface is slightly brighter; where it is low, the base scale dominates.
-    mediump float organic = macroMask(v_worldPos, tw);
-    mediump float fineMix = mix(0.25, 0.65, organic);
-    mediump float brightness = mix(0.88, 1.12, organic);
+    // Sky exposure baked per vertex by the mesher: sun and sky light only reach points that can see
+    // the sky, so a tunnel goes dark even at noon and the flashlight becomes necessary. The
+    // smoothstep keeps entrances bright and makes anything under ~3 m of earth really dark.
+    mediump float sky = smoothstep(0.04, 0.85, v_skyOcc);
 
-    // Material layer weights: grass on flat exterior tops, dirt on slopes/walls, rock in deep tunnels
-    // (smoothstep edges kept ascending: reversed edges are undefined in GLSL)
-    mediump float grassW = smoothstep(0.66, 0.86, geomN.y) * smoothstep(-0.8, 0.5, v_worldPos.y);
+    // Two ALU-only noise octaves drive the material borders (ragged patches instead of straight
+    // contour lines); the low one also gives a slight brightness variation that hides repetition
+    HP vec2 noiseUv = v_worldPos.xz + v_worldPos.y * vec2(0.37, 0.71);
+    mediump float n = valueNoise(noiseUv * 0.45);
+    mediump float n2 = valueNoise(noiseUv * 2.3 + 17.0);
+    mediump float brightness = mix(0.9, 1.1, n);
+    mediump float jitter = (n * 0.55 + n2 * 0.45 - 0.5) * 1.1;
+
+    // Material scores: grass on flat exterior tops, dirt on slopes/walls, rock in tunnels
+    // (smoothstep edges kept ascending: reversed edges are undefined in GLSL). Grass needs sunlight
+    // and anything out of the sun turns to rock, so a tunnel floor is never grass.
+    mediump float grassW = smoothstep(0.66, 0.86, geomN.y) * smoothstep(-0.8, 0.5, v_worldPos.y) * sky;
     mediump float rockBase = clamp(
         (1.0 - smoothstep(-2.4, 0.5, v_worldPos.y)) +
-            (1.0 - smoothstep(-0.35, 0.20, geomN.y)) * 0.75,
+            (1.0 - smoothstep(-0.35, 0.20, geomN.y)) * 0.75 +
+            (1.0 - sky),
         0.0,
         1.0
     );
     mediump float nonGrass = 1.0 - grassW;
-    mediump float rockW = max(rockBase * nonGrass - WEIGHT_CUTOFF, 0.0);
-    mediump float dirtW = max((1.0 - rockBase) * nonGrass - WEIGHT_CUTOFF, 0.0);
-    grassW = max(grassW - WEIGHT_CUTOFF, 0.0);
+    mediump float scoreGrass = grassW + jitter;
+    mediump float scoreDirt = (1.0 - rockBase) * nonGrass;
+    mediump float scoreRock = rockBase * nonGrass - jitter * 0.6;
 
-    mediump vec3 albedo = vec3(0.0);
-    mediump vec3 accumNormal = vec3(0.0);
-    mediump float matWeightSum = 0.0;
-
-    if (grassW > 0.0) {
-        albedo += sampleMaterial(u_grassColor, projX, projY, projZ, tw, fineMix) * grassW;
-        accumNormal += sampleDominantNormal(u_grassNormal, dom, domAxis, geomN) * grassW;
-        matWeightSum += grassW;
+    int matId = 1;
+    mediump float best = scoreDirt;
+    if (scoreGrass > best) {
+        matId = 0;
+        best = scoreGrass;
     }
-    if (dirtW > 0.0) {
-        albedo += sampleMaterial(u_dirtColor, projX, projY, projZ, tw, fineMix) * dirtW;
-        accumNormal += sampleDominantNormal(u_dirtNormal, dom, domAxis, geomN) * dirtW;
-        matWeightSum += dirtW;
-    }
-    if (rockW > 0.0) {
-        albedo += sampleMaterial(u_rockColor, projX, projY, projZ, tw, fineMix) * rockW;
-        accumNormal += sampleDominantNormal(u_rockNormal, dom, domAxis, geomN) * rockW;
-        matWeightSum += rockW;
+    if (scoreRock > best) {
+        matId = 2;
     }
 
-    mediump float invMatW = 1.0 / max(matWeightSum, 0.0001);
-    albedo *= invMatW * brightness;
-    mediump vec3 N = normalize(accumNormal);
+    mediump float normalAmount = 1.0 - smoothstep(NORMAL_FADE_START, NORMAL_FADE_END, camDist);
+    bool useNormal = normalAmount > 0.0;
 
-    // Ambient + Directional sun lighting
-    mediump vec3 lighting = u_ambientColor * albedo;
+    mediump vec3 albedo;
+    mediump vec3 N = geomN;
+    if (matId == 0) {
+        albedo = sampleColor(u_grassColor, projX, projY, projZ, tw);
+        if (useNormal) N = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
+    } else if (matId == 1) {
+        albedo = sampleColor(u_dirtColor, projX, projY, projZ, tw);
+        if (useNormal) N = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
+    } else {
+        albedo = sampleColor(u_rockColor, projX, projY, projZ, tw);
+        if (useNormal) N = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
+    }
+    albedo *= brightness;
+
+    // Ambient + Directional sun lighting, both scaled by the sky exposure
+    mediump vec3 lighting = u_ambientColor * mix(CAVE_AMBIENT_MIN, 1.0, sky) * albedo;
     mediump vec3 dirL = normalize(-u_dirLightDir);
     mediump float dirDiff = max(dot(N, dirL), 0.0);
-    lighting += albedo * u_dirLightColor * dirDiff;
+    lighting += albedo * u_dirLightColor * (dirDiff * sky);
 
     // SpotLight (Flashlight) with normal-mapped relief & subtle specular inside caves
     if (u_spotLightIntensity > 0.001) {
@@ -488,6 +526,11 @@ void main() {
             lighting += (albedo * spotDiff + vec3(spec)) * u_spotLightColor * spotFactor * atten;
         }
     }
+
+    // Exponential-squared distance fog (colour follows the sky so distant terrain melts into it)
+    HP float fogArg = camDist * u_fogDensity;
+    mediump float fogAmount = clamp(1.0 - exp(-fogArg * fogArg), 0.0, 1.0);
+    lighting = mix(lighting, u_fogColor, fogAmount);
 
     fragColor = vec4(lighting, 1.0);
 }
