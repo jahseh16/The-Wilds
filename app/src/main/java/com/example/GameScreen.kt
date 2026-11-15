@@ -38,7 +38,7 @@ class GameScreen : Screen {
   )
   private val environment: Environment
   private val flashlight: SpotLight
-  private val volumeMesh: VoxelVolumeMesh
+  private val chunkManager: ChunkManager
   private val hudStage: HudStage
 
   // Anti-pixelation terrain textures (diffuse + normal maps) & tri-planar shader
@@ -79,12 +79,18 @@ class GameScreen : Screen {
   // Reusable movement vectors to avoid per-frame allocations
   private val forwardXZ = Vector3()
   private val rightXZ = Vector3()
+  private val streamingPos = Vector3()
 
   init {
-    volumeMesh = VoxelVolumeMesh()
-    playerX = (volumeMesh.minX + volumeMesh.maxX) * 0.5f
-    playerZ = (volumeMesh.minZ + volumeMesh.maxZ) * 0.5f
-    playerFeetY = volumeMesh.findSpawnY(playerX, playerZ)
+    chunkManager = ChunkManager()
+    // Spawn on dry land as close to the island centre as possible (never in the water)
+    val spawn = chunkManager.findDrySpawn(Vector3())
+    playerX = spawn.x
+    playerZ = spawn.z
+    playerFeetY = spawn.y
+    // Load the chunks around the spawn now so the ground is there on frame 1; the rest of the
+    // streaming radius fills in one chunk per frame from render()
+    chunkManager.prewarm(spawn)
 
     flashlight = SpotLight().apply {
       set(
@@ -110,7 +116,7 @@ class GameScreen : Screen {
     ).apply {
       position.set(playerX, playerFeetY + currentEyeHeight, playerZ)
       near = 0.05f
-      far = 160f
+      far = 320f // island is ~160 m across, so keep the far shore inside the frustum
     }
     updateCameraOrientation()
 
@@ -141,8 +147,8 @@ class GameScreen : Screen {
   }
 
   private fun loadTerrainTexture(internalPath: String): Texture =
+    // Mipmaps are generated here; min/mag filtering and anisotropy are set by TerrainShader.init()
     Texture(Gdx.files.internal(internalPath), true).apply {
-      setFilter(Texture.TextureFilter.MipMapLinearLinear, Texture.TextureFilter.MipMapLinearLinear)
       setWrap(Texture.TextureWrap.Repeat, Texture.TextureWrap.Repeat)
     }
 
@@ -152,6 +158,10 @@ class GameScreen : Screen {
 
   override fun render(delta: Float) {
     val dt = delta.coerceAtMost(0.05f)
+
+    // The terrain only needs to know where the player is (streams chunks in/out, max 1 per frame)
+    streamingPos.set(playerX, playerFeetY, playerZ)
+    chunkManager.update(streamingPos, dt)
 
     updatePlayerPhysics(dt)
     camera.update()
@@ -163,16 +173,12 @@ class GameScreen : Screen {
     Gdx.gl.glClearColor(0.45f, 0.65f, 0.85f, 1f)
     Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)
 
-    // Render 3D world with tri-planar normal-mapped shader & ground aim ring
+    // Render 3D world with tri-planar normal-mapped shader & ground aim ring;
+    // chunks outside the camera frustum are culled
     modelBatch.begin(camera)
-    for (i in 0 until volumeMesh.chunkCount) {
-      val chunkInstance = volumeMesh.getVisibleChunkInstance(i)
-      if (chunkInstance != null) {
-        modelBatch.render(chunkInstance, environment, terrainShader)
-      }
-    }
+    chunkManager.renderVisible(modelBatch, environment, terrainShader, camera.frustum)
     if (hasAimHit) {
-      modelBatch.render(volumeMesh.aimIndicatorInstance)
+      modelBatch.render(chunkManager.aimIndicatorInstance)
     }
     modelBatch.end()
 
@@ -251,7 +257,7 @@ class GameScreen : Screen {
           verticalVelocity = 0f
           isGrounded = true
         } else {
-          playerFeetY = nextFeetY.coerceAtLeast(volumeMesh.minY + 0.5f)
+          playerFeetY = nextFeetY.coerceAtLeast(chunkManager.minY + 0.5f)
         }
       }
     }
@@ -268,12 +274,12 @@ class GameScreen : Screen {
     if (deltaX == 0f && deltaZ == 0f) return
 
     val targetX = (playerX + deltaX).coerceIn(
-      volumeMesh.minX + TERRAIN_EDGE_MARGIN,
-      volumeMesh.maxX - TERRAIN_EDGE_MARGIN
+      chunkManager.minX + TERRAIN_EDGE_MARGIN,
+      chunkManager.maxX - TERRAIN_EDGE_MARGIN
     )
     val targetZ = (playerZ + deltaZ).coerceIn(
-      volumeMesh.minZ + TERRAIN_EDGE_MARGIN,
-      volumeMesh.maxZ - TERRAIN_EDGE_MARGIN
+      chunkManager.minZ + TERRAIN_EDGE_MARGIN,
+      chunkManager.maxZ - TERRAIN_EDGE_MARGIN
     )
 
     if (!isGrounded) {
@@ -300,7 +306,7 @@ class GameScreen : Screen {
   }
 
   private fun isSolidPoint(x: Float, y: Float, z: Float): Boolean =
-    volumeMesh.getDensityAt(x, y, z) > VoxelVolumeMesh.ISO_LEVEL
+    chunkManager.getDensityAt(x, y, z) > VoxelVolumeMesh.ISO_LEVEL
 
   private fun isSolidFeet(x: Float, y: Float, z: Float): Boolean {
     if (isSolidPoint(x, y, z)) return true
@@ -406,14 +412,14 @@ class GameScreen : Screen {
 
     if (aimRaycastTimer >= AIM_RAYCAST_INTERVAL || digPressed) {
       aimRaycastTimer = 0f
-      hasAimHit = volumeMesh.raycast(
+      hasAimHit = chunkManager.raycast(
         origin = camera.position,
         direction = camera.direction,
         maxDistance = MAX_DIG_RANGE,
         outHit = aimHitPoint
       )
       if (hasAimHit) {
-        volumeMesh.updateAimIndicator(aimHitPoint)
+        chunkManager.updateAimIndicator(aimHitPoint)
       }
     }
 
@@ -422,7 +428,7 @@ class GameScreen : Screen {
       swingTimer = 0f
 
       if (hasAimHit) {
-        volumeMesh.excavateSphere(
+        chunkManager.excavateSphere(
           center = aimHitPoint,
           radius = DIG_SPHERE_RADIUS,
           strength = DIG_SPHERE_STRENGTH
@@ -432,14 +438,14 @@ class GameScreen : Screen {
           isGrounded = false
         }
 
-        hasAimHit = volumeMesh.raycast(
+        hasAimHit = chunkManager.raycast(
           origin = camera.position,
           direction = camera.direction,
           maxDistance = MAX_DIG_RANGE,
           outHit = aimHitPoint
         )
         if (hasAimHit) {
-          volumeMesh.updateAimIndicator(aimHitPoint)
+          chunkManager.updateAimIndicator(aimHitPoint)
         }
       }
     }
@@ -586,7 +592,7 @@ class GameScreen : Screen {
     rockColorTex.dispose()
     rockNormalTex.dispose()
     shovelModel.dispose()
-    volumeMesh.dispose()
+    chunkManager.dispose()
     hudStage.dispose()
   }
 
