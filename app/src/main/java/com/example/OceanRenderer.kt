@@ -23,8 +23,9 @@ import kotlin.math.ceil
  * horizontally (so it always reaches the horizon) and is drawn with [WaterShader] after the opaque
  * terrain. Waves live in the shader, so the mesh is just 4 vertices.
  *
- * It bakes a [ShoreMap] of the original terrain once at construction (about 1 m per texel, a few
- * thousand height samples) which gives the shader the water depth for foam and transparency.
+ * It bakes a [ShoreMap] of the original terrain once at construction ([SHORE_TEXEL_METRES] per texel,
+ * ~260k height samples for the 1 km island, a fraction of a second) which gives the shader the water
+ * depth for foam and transparency. The shores are long gentle slopes, so 2 m texels are plenty.
  */
 class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
 
@@ -101,8 +102,8 @@ class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
   }
 
   companion object {
-    /** Shore map resolution: one texel per this many metres (the island world is ~160 m). */
-    private const val SHORE_TEXEL_METRES = 1f
+    /** Shore map resolution: one texel per this many metres (the world is ~1 km: 512 x 512 texels). */
+    private const val SHORE_TEXEL_METRES = 2f
 
     /**
      * Half the side of the plane. Larger than the far-plane corner distance of the camera frustum

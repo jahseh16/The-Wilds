@@ -6,15 +6,15 @@ package com.example
  *
  * One byte per texel, row-major with row = Z (row 0 at [originZ]) and column = X. The value encodes
  * the depth of the water column at that point: `0.5` is exactly sea level, brighter is deeper,
- * darker is land above the sea. [DEPTH_RANGE] metres span the whole 0..1 range (+-6 m around sea
- * level), which is plenty for the 5 m sea floor and gives ~5 cm of precision.
+ * darker is land above the sea. [DEPTH_RANGE] metres span the whole 0..1 range (+-8 m around sea
+ * level), which holds the 7 m sea floor with ~6 cm of precision.
  *
  * It describes the terrain as generated, not as dug: player excavation does not flood.
  */
 object ShoreMap {
 
-  /** Metres covered by the full 0..1 byte range (depth -6 .. +6). */
-  const val DEPTH_RANGE = 12f
+  /** Metres covered by the full 0..1 byte range (depth -8 .. +8; the sea floor is 7 m down). */
+  const val DEPTH_RANGE = 16f
 
   fun encode(depthMetres: Float): Int =
     ((depthMetres / DEPTH_RANGE + 0.5f).coerceIn(0f, 1f) * 255f + 0.5f).toInt()

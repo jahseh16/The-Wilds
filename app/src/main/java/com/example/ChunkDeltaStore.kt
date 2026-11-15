@@ -3,7 +3,7 @@ package com.example
 import com.badlogic.gdx.utils.IntFloatMap
 
 /**
- * Sparse, in-memory record of every density sample the player has changed, keyed by chunk.
+ * Sparse, in-memory record of every density sample the player has changed, keyed by chunk (see [Chunk.key]).
  *
  * Chunks are pure functions of the terrain generator plus these deltas, so a chunk can be disposed
  * when it leaves the streaming radius and regenerated later with all its excavation intact. Only
@@ -12,24 +12,24 @@ import com.badlogic.gdx.utils.IntFloatMap
  */
 class ChunkDeltaStore {
 
-  private val perChunk = HashMap<Int, IntFloatMap>()
+  private val perChunk = HashMap<Long, IntFloatMap>()
 
   val editedChunkCount: Int
     get() = perChunk.size
 
-  /** Final density stored for [localIndex] in chunk [chunkIndex], or NaN if it was never edited. */
-  fun get(chunkIndex: Int, localIndex: Int): Float {
-    val map = perChunk[chunkIndex] ?: return Float.NaN
+  /** Final density stored for [localIndex] in chunk [chunkKey], or NaN if it was never edited. */
+  fun get(chunkKey: Long, localIndex: Int): Float {
+    val map = perChunk[chunkKey] ?: return Float.NaN
     return map.get(localIndex, Float.NaN)
   }
 
-  fun put(chunkIndex: Int, localIndex: Int, density: Float) {
-    perChunk.getOrPut(chunkIndex) { IntFloatMap() }.put(localIndex, density)
+  fun put(chunkKey: Long, localIndex: Int, density: Float) {
+    perChunk.getOrPut(chunkKey) { IntFloatMap() }.put(localIndex, density)
   }
 
-  /** Overwrites the freshly generated [density] samples of chunk [chunkIndex] with the saved edits. */
-  fun applyTo(chunkIndex: Int, density: FloatArray) {
-    val map = perChunk[chunkIndex] ?: return
+  /** Overwrites the freshly generated [density] samples of chunk [chunkKey] with the saved edits. */
+  fun applyTo(chunkKey: Long, density: FloatArray) {
+    val map = perChunk[chunkKey] ?: return
     for (entry in map.entries()) {
       density[entry.key] = entry.value
     }

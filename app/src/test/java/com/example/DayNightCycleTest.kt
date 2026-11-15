@@ -113,4 +113,44 @@ class DayNightCycleTest {
     assertEquals(cycle.lightColor.g, sun.color.g, 1e-6f)
     assertEquals(cycle.lightDirection.y, sun.direction.y, 1e-6f)
   }
+
+  @Test
+  fun sunAndMoonAreOppositeUnitVectorsAndFollowTheLight() {
+    val cycle = DayNightCycle(DayPhase.DAY)
+    for (i in 0 until 40) {
+      cycle.update(cycle.cycleSeconds / 40f)
+      assertEquals(1f, cycle.sunDirection.len(), 1e-4f)
+      assertEquals(0f, cycle.sunDirection.dot(cycle.moonDirection) + 1f, 1e-4f)
+      assertEquals(cycle.sunDirection.y, cycle.sunElevation, 1e-6f)
+    }
+    // At noon the light travels exactly against the sun direction
+    val noon = DayNightCycle(DayPhase.DAY)
+    assertEquals(-noon.sunDirection.x, noon.lightDirection.x, 1e-5f)
+    assertEquals(-noon.sunDirection.y, noon.lightDirection.y, 1e-5f)
+  }
+
+  @Test
+  fun starsAndMoonAppearAtNightAndVanishByDay() {
+    val day = DayNightCycle(DayPhase.DAY)
+    assertEquals(0f, day.starVisibility, 0f)
+    assertEquals(0f, day.moonVisibility, 0f)
+    assertEquals(1f, day.sunVisibility, 0f)
+
+    val night = DayNightCycle(DayPhase.NIGHT)
+    assertEquals(1f, night.starVisibility, 1e-4f)
+    assertEquals(1f, night.moonVisibility, 1e-4f)
+    assertEquals(0f, night.sunVisibility, 0f)
+    assertTrue("moon is up at midnight", night.moonDirection.y > 0.5f)
+
+    // Gradual: somewhere between dusk and night the stars are half in
+    val cycle = DayNightCycle(DayPhase.DUSK)
+    var sawPartial = false
+    repeat(100) {
+      cycle.update(cycle.cycleSeconds * 0.25f / 100f)
+      if (cycle.starVisibility in 0.1f..0.9f) sawPartial = true
+    }
+    assertTrue(sawPartial)
+    // Dawn: stars are gone again
+    assertEquals(0f, DayNightCycle(DayPhase.DAWN).starVisibility, 0f)
+  }
 }

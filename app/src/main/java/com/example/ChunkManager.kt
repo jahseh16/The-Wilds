@@ -27,9 +27,13 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Owns the world as a grid of 16x32x16 [Chunk]s filled with a procedural island, meshes them
+ * Owns the world as a grid of 16x64x16 [Chunk]s filled with a procedural island, meshes them
  * with Marching Cubes and answers every spatial query (density, raycast, spawn, excavation) in
  * world coordinates by routing it to the right chunk.
+ *
+ * The 1 km island spans 64 x 64 chunk slots but only the ones near the player exist: resident
+ * chunks live in a sparse `HashMap<Long, Chunk>` keyed by [Chunk.key], so memory is proportional to
+ * the streaming radius, not to the size of the world.
  *
  * Only the chunks within [LOAD_RADIUS_CHUNKS] of the player are resident (see [update]); the rest
  * of the world exists implicitly as "terrain function + [ChunkDeltaStore] edits", so queries such
@@ -58,7 +62,7 @@ class ChunkManager(
 
   val minX: Float = 0.0f
   val maxX: Float = cellsX * voxelSize
-  val minY: Float = -8.0f
+  val minY: Float = -12.0f
   val maxY: Float = minY + cellsY * voxelSize
   val minZ: Float = 0.0f
   val maxZ: Float = cellsZ * voxelSize
@@ -73,8 +77,17 @@ class ChunkManager(
     IntAttribute.createCullFace(GL20.GL_NONE)
   )
 
-  /** Resident chunks indexed by cz * chunksX + cx; null = not loaded (streamed in/out). */
-  private val chunks: Array<Chunk?> = arrayOfNulls(chunksX * chunksZ)
+  /** Resident chunks only, keyed by [Chunk.key]; a missing key means "not loaded" (streamed in/out). */
+  private val chunks = HashMap<Long, Chunk>()
+
+  /** The same chunks as a list, so the per-frame loops (culling, unloading) allocate nothing. */
+  private val residentChunks = ArrayList<Chunk>()
+
+  // The mesher asks for the density of neighbouring chunks thousands of times in a row, always
+  // around the same 3x3 chunks. A small direct-mapped cache in front of the HashMap makes those
+  // lookups free of hashing and boxing; it is flushed whenever a chunk is added or removed.
+  private val lookupKeys = LongArray(LOOKUP_CACHE_SIZE) { NO_KEY }
+  private val lookupChunks = arrayOfNulls<Chunk>(LOOKUP_CACHE_SIZE)
 
   /** Player excavation, kept for the whole session even while its chunk is unloaded. */
   private val deltas = ChunkDeltaStore()
@@ -86,13 +99,12 @@ class ChunkManager(
   private val unloadRadius: Float = (LOAD_RADIUS_CHUNKS + UNLOAD_HYSTERESIS_CHUNKS) * chunkSpanX
   private val unloadRadiusSq: Float = unloadRadius * unloadRadius
 
-  private val loadQueue = ArrayDeque<Int>()
+  private val loadQueue = ArrayDeque<Long>()
   private var lastPlayerChunkX = Int.MIN_VALUE
   private var lastPlayerChunkZ = Int.MIN_VALUE
-  private var loadedCount = 0
   private val listeners = ArrayList<ChunkListener>(2)
 
-  private class QueueEntry(val index: Int, val distSq: Float)
+  private class QueueEntry(val key: Long, val distSq: Float)
 
   private val aimModel: Model
   val aimIndicatorInstance: ModelInstance
@@ -127,14 +139,31 @@ class ChunkManager(
 
   /** Number of chunks currently resident in memory. */
   val loadedChunkCount: Int
-    get() = loadedCount
+    get() = residentChunks.size
 
   /** Number of chunks queued to be generated (nearest first), one per [update] call. */
   val pendingChunkCount: Int
     get() = loadQueue.size
 
-  fun isChunkLoaded(cx: Int, cz: Int): Boolean =
-    cx in 0 until chunksX && cz in 0 until chunksZ && chunks[cz * chunksX + cx] != null
+  fun isChunkLoaded(cx: Int, cz: Int): Boolean = chunkAt(cx, cz) != null
+
+  /** The resident chunk at (cx, cz), or null. Cached; allocation-free on a cache hit. */
+  private fun chunkAt(cx: Int, cz: Int): Chunk? {
+    val key = Chunk.key(cx, cz)
+    val slot = (cx * 7 + cz * 3) and (LOOKUP_CACHE_SIZE - 1)
+    if (lookupKeys[slot] == key) return lookupChunks[slot]
+    val chunk = chunks[key]
+    lookupKeys[slot] = key
+    lookupChunks[slot] = chunk
+    return chunk
+  }
+
+  private fun flushLookupCache() {
+    java.util.Arrays.fill(lookupKeys, NO_KEY)
+    java.util.Arrays.fill(lookupChunks, null)
+  }
+
+  private fun inWorld(cx: Int, cz: Int): Boolean = cx in 0 until chunksX && cz in 0 until chunksZ
 
   // --- Streaming ------------------------------------------------------------------------------
 
@@ -169,8 +198,7 @@ class ChunkManager(
     val pcz = chunkCoordZ(center.z)
     for (cz in (pcz - radiusChunks).coerceAtLeast(0)..(pcz + radiusChunks).coerceAtMost(chunksZ - 1)) {
       for (cx in (pcx - radiusChunks).coerceAtLeast(0)..(pcx + radiusChunks).coerceAtMost(chunksX - 1)) {
-        val index = cz * chunksX + cx
-        if (chunks[index] == null) loadChunk(index)
+        if (chunkAt(cx, cz) == null) loadChunk(cx, cz)
       }
     }
   }
@@ -187,20 +215,18 @@ class ChunkManager(
 
   private fun chunkCoordZ(worldZ: Float): Int = floor((worldZ - minZ) / chunkSpanZ).toInt()
 
-  /** Squared horizontal distance from (px, pz) to the centre of chunk [index]. */
-  private fun chunkDistSq(index: Int, px: Float, pz: Float): Float {
-    val cx = index % chunksX
-    val cz = index / chunksX
+  /** Squared horizontal distance from (px, pz) to the centre of chunk (cx, cz). */
+  private fun chunkDistSq(cx: Int, cz: Int, px: Float, pz: Float): Float {
     val dx = minX + (cx + 0.5f) * chunkSpanX - px
     val dz = minZ + (cz + 0.5f) * chunkSpanZ - pz
     return dx * dx + dz * dz
   }
 
   private fun unloadDistantChunks(px: Float, pz: Float) {
-    for (index in chunks.indices) {
-      if (chunks[index] != null && chunkDistSq(index, px, pz) > unloadRadiusSq) {
-        unloadChunk(index)
-      }
+    // Backwards: unloading removes the element from the list being walked
+    for (i in residentChunks.indices.reversed()) {
+      val chunk = residentChunks[i]
+      if (chunkDistSq(chunk.cx, chunk.cz, px, pz) > unloadRadiusSq) unloadChunk(chunk)
     }
   }
 
@@ -210,44 +236,47 @@ class ChunkManager(
     val candidates = ArrayList<QueueEntry>()
     for (cz in (playerChunkZ - window).coerceAtLeast(0)..(playerChunkZ + window).coerceAtMost(chunksZ - 1)) {
       for (cx in (playerChunkX - window).coerceAtLeast(0)..(playerChunkX + window).coerceAtMost(chunksX - 1)) {
-        val index = cz * chunksX + cx
-        if (chunks[index] != null) continue
-        val distSq = chunkDistSq(index, px, pz)
-        if (distSq <= loadRadiusSq) candidates.add(QueueEntry(index, distSq))
+        if (chunkAt(cx, cz) != null) continue
+        val distSq = chunkDistSq(cx, cz, px, pz)
+        if (distSq <= loadRadiusSq) candidates.add(QueueEntry(Chunk.key(cx, cz), distSq))
       }
     }
     candidates.sortBy { it.distSq }
-    for (entry in candidates) loadQueue.addLast(entry.index)
+    for (entry in candidates) loadQueue.addLast(entry.key)
   }
 
   /** Generates and meshes the nearest queued chunk. Returns false when nothing was pending. */
   private fun loadNextQueuedChunk(): Boolean {
     while (loadQueue.isNotEmpty()) {
-      val index = loadQueue.removeFirst()
-      if (chunks[index] != null) continue
-      loadChunk(index)
+      val key = loadQueue.removeFirst()
+      val cx = Chunk.keyX(key)
+      val cz = Chunk.keyZ(key)
+      if (chunkAt(cx, cz) != null) continue
+      loadChunk(cx, cz)
       return true
     }
     return false
   }
 
-  private fun loadChunk(index: Int) {
-    val chunk = Chunk(index % chunksX, index / chunksX, terrainMaterial)
+  private fun loadChunk(cx: Int, cz: Int) {
+    val key = Chunk.key(cx, cz)
+    val chunk = Chunk(cx, cz, terrainMaterial)
     generateChunk(chunk)
-    deltas.applyTo(index, chunk.density)
+    deltas.applyTo(key, chunk.density)
     // Registered before meshing so the chunk's own border samples resolve to it, not to the
     // analytic fallback. Loaded neighbours stay valid: the fallback returns exactly these values.
-    chunks[index] = chunk
-    loadedCount++
+    chunks[key] = chunk
+    residentChunks.add(chunk)
+    flushLookupCache()
     rebuildChunk(chunk)
     for (listener in listeners) listener.onChunkLoaded(chunk)
   }
 
-  private fun unloadChunk(index: Int) {
-    val chunk = chunks[index] ?: return
+  private fun unloadChunk(chunk: Chunk) {
     for (listener in listeners) listener.onChunkUnloaded(chunk)
-    chunks[index] = null
-    loadedCount--
+    chunks.remove(Chunk.key(chunk.cx, chunk.cz))
+    residentChunks.remove(chunk)
+    flushLookupCache()
     chunk.dispose()
   }
 
@@ -256,11 +285,15 @@ class ChunkManager(
   private fun generateChunk(chunk: Chunk) {
     val baseGx = chunk.cx * Chunk.SIZE_X
     val baseGz = chunk.cz * Chunk.SIZE_Z
-    for (lz in 0 until Chunk.SIZE_Z) {
+    var maxSurface = -Float.MAX_VALUE
+    for (lz in 0..Chunk.SIZE_Z) {
       val wz = minZ + (baseGz + lz) * voxelSize
-      for (lx in 0 until Chunk.SIZE_X) {
+      for (lx in 0..Chunk.SIZE_X) {
         val wx = minX + (baseGx + lx) * voxelSize
         val surfaceHeight = terrain.heightAt(wx, wz)
+        if (surfaceHeight > maxSurface) maxSurface = surfaceHeight
+        // The +X / +Z border columns belong to the neighbours: sampled only for the height bound
+        if (lx == Chunk.SIZE_X || lz == Chunk.SIZE_Z) continue
         for (gy in 0 until Chunk.GRID_Y) {
           val wy = minY + gy * voxelSize
           // Positive inside earth (below surface), negative in air (above surface)
@@ -268,6 +301,7 @@ class ChunkManager(
         }
       }
     }
+    chunk.maxSurfaceY = maxSurface
   }
 
   /** Analytic (unedited) terrain density at a grid point, independent of any loaded chunk. */
@@ -290,12 +324,13 @@ class ChunkManager(
     val z = gz.coerceIn(0, cellsZ)
     if (x >= cellsX || z >= cellsZ) return terrainDensity(x, y, z)
 
-    val index = (z / Chunk.SIZE_Z) * chunksX + (x / Chunk.SIZE_X)
+    val cx = x / Chunk.SIZE_X
+    val cz = z / Chunk.SIZE_Z
     val local = Chunk.index(x % Chunk.SIZE_X, y, z % Chunk.SIZE_Z)
-    val chunk = chunks[index]
+    val chunk = chunkAt(cx, cz)
     if (chunk != null) return chunk.density[local]
 
-    val edited = deltas.get(index, local)
+    val edited = deltas.get(Chunk.key(cx, cz), local)
     return if (edited.isNaN()) terrainDensity(x, y, z) else edited
   }
 
@@ -324,13 +359,13 @@ class ChunkManager(
    * can attach an exposure to every vertex. It only reads the column itself, so an edit can change
    * it only for the columns it touches, which the existing dirty-range logic already covers.
    */
-  private fun computeSkyExposure(baseGx: Int, baseGz: Int) {
+  private fun computeSkyExposure(baseGx: Int, baseGz: Int, topIndex: Int) {
     for (lz in 0..Chunk.SIZE_Z) {
       val gz = baseGz + lz
       for (lx in 0..Chunk.SIZE_X) {
         val gx = baseGx + lx
         SkyExposure.fillColumn(
-          skyExposure, (lz * (Chunk.SIZE_X + 1) + lx) * Chunk.GRID_Y, cellsY, voxelSize
+          skyExposure, (lz * (Chunk.SIZE_X + 1) + lx) * Chunk.GRID_Y, topIndex, voxelSize
         ) { gy -> gridDensity(gx, gy, gz) }
       }
     }
@@ -367,7 +402,11 @@ class ChunkManager(
   private fun rebuildChunk(chunk: Chunk) {
     val baseGx = chunk.cx * Chunk.SIZE_X
     val baseGz = chunk.cz * Chunk.SIZE_Z
-    computeSkyExposure(baseGx, baseGz)
+
+    // Nothing is solid above the highest generated surface (excavation only removes earth), so
+    // the cell layers above it are skipped: on the 64-level chunk a beach chunk meshes ~20 layers
+    val topCell = (floor((chunk.maxSurfaceY - minY) / voxelSize).toInt() + 1).coerceIn(0, cellsY - 1)
+    computeSkyExposure(baseGx, baseGz, topCell + 1)
 
     var vertCount = 0
     var idxCount = 0
@@ -380,7 +419,7 @@ class ChunkManager(
     var boundMaxY = -Float.MAX_VALUE
     var boundMaxZ = -Float.MAX_VALUE
 
-    for (gy in 0 until cellsY) {
+    for (gy in 0..topCell) {
       val wy0 = minY + gy * voxelSize
       val wy1 = wy0 + voxelSize
 
@@ -537,8 +576,9 @@ class ChunkManager(
     frustum: Frustum
   ): Int {
     var drawn = 0
-    for (chunk in chunks) {
-      if (chunk == null || !chunk.hasGeometry) continue
+    for (i in 0 until residentChunks.size) {
+      val chunk = residentChunks[i]
+      if (!chunk.hasGeometry) continue
       if (!frustum.boundsInFrustum(chunk.bounds)) continue
       batch.render(chunk, environment, shader)
       drawn++
@@ -586,13 +626,13 @@ class ChunkManager(
             // carved wall blends into the untouched terrain without a crease
             val t = sqrt(distSq) / radius
             val falloff = 1f - t * t * (3f - 2f * t)
-            val chunkIndex = (gz / Chunk.SIZE_Z) * chunksX + (gx / Chunk.SIZE_X)
+            val chunkKey = Chunk.key(gx / Chunk.SIZE_X, gz / Chunk.SIZE_Z)
             val local = Chunk.index(gx % Chunk.SIZE_X, gy, gz % Chunk.SIZE_Z)
             val updated = (gridDensity(gx, gy, gz) - strength * falloff).coerceAtLeast(-MAX_DENSITY)
             // Written to the resident chunk (if any) AND to the persistent deltas, so the edit
             // survives the chunk being streamed out and also works on chunks not loaded yet
-            chunks[chunkIndex]?.let { it.density[local] = updated }
-            deltas.put(chunkIndex, local, updated)
+            chunkAt(gx / Chunk.SIZE_X, gz / Chunk.SIZE_Z)?.let { it.density[local] = updated }
+            deltas.put(chunkKey, local, updated)
             modified = true
           }
         }
@@ -616,7 +656,7 @@ class ChunkManager(
     for (cz in minCz..maxCz) {
       for (cx in minCx..maxCx) {
         // Unloaded chunks need no remesh: they are built from the deltas when they load
-        chunks[cz * chunksX + cx]?.let { rebuildChunk(it) }
+        chunkAt(cx, cz)?.let { rebuildChunk(it) }
       }
     }
   }
@@ -684,8 +724,8 @@ class ChunkManager(
   }
 
   /**
-   * Picks a spawn on dry land as close to the island centre as possible: walks outward in rings
-   * until the terrain is comfortably above [seaLevel], then lets [findSpawnY] settle the height.
+   * Picks a spawn on the lowlands as close to the island centre as possible: walks outward in rings
+   * until the terrain is above [seaLevel] but below the mountains, then lets [findSpawnY] settle the height.
    * Writes the result (x, feet-clearance y, z) into [out].
    */
   fun findDrySpawn(out: Vector3): Vector3 {
@@ -706,9 +746,10 @@ class ChunkManager(
   }
 
   private fun isDryLand(x: Float, z: Float): Boolean {
-    if (terrain.heightAt(x, z) < seaLevel + SPAWN_MIN_HEIGHT_ABOVE_SEA) return false
-    // Reject steep spots so the player does not start on a cliff face
     val h = terrain.heightAt(x, z)
+    // Comfortably above the water, but on the lowlands: not up on the mountains
+    if (h < seaLevel + SPAWN_MIN_HEIGHT_ABOVE_SEA || h > seaLevel + SPAWN_MAX_HEIGHT_ABOVE_SEA) return false
+    // Reject steep spots so the player does not start on a cliff face
     val d = SPAWN_SLOPE_PROBE
     return abs(terrain.heightAt(x + d, z) - h) < SPAWN_MAX_SLOPE_DELTA &&
       abs(terrain.heightAt(x - d, z) - h) < SPAWN_MAX_SLOPE_DELTA &&
@@ -843,17 +884,17 @@ class ChunkManager(
   }
 
   override fun dispose() {
-    for (index in chunks.indices) {
-      chunks[index]?.dispose()
-      chunks[index] = null
-    }
-    loadedCount = 0
+    for (chunk in residentChunks) chunk.dispose()
+    residentChunks.clear()
+    chunks.clear()
+    flushLookupCache()
     loadQueue.clear()
     aimModel.dispose()
   }
 
   companion object {
-    const val DEFAULT_ISLAND_RADIUS = 72f
+    /** 500 m radius = a 1 km island. */
+    const val DEFAULT_ISLAND_RADIUS = IslandTerrain.REFERENCE_RADIUS
 
     /** Chunks within this many chunks (16 m each, ~80 m) of the player stay resident, in all directions. */
     const val LOAD_RADIUS_CHUNKS = 5
@@ -879,8 +920,12 @@ class ChunkManager(
     private const val MAX_CELL_VERTICES = 12
     private const val MAX_CELL_INDICES = 15
 
-    private const val SPAWN_SEARCH_STEP = 2f
-    private const val SPAWN_MIN_HEIGHT_ABOVE_SEA = 1.5f
+    private const val LOOKUP_CACHE_SIZE = 32 // power of two; see chunkAt()
+    private const val NO_KEY = Long.MIN_VALUE
+
+    private const val SPAWN_SEARCH_STEP = 4f
+    private const val SPAWN_MIN_HEIGHT_ABOVE_SEA = 2.0f
+    private const val SPAWN_MAX_HEIGHT_ABOVE_SEA = 7.0f
     private const val SPAWN_SLOPE_PROBE = 1.5f
     private const val SPAWN_MAX_SLOPE_DELTA = 1.6f
 

@@ -43,6 +43,7 @@ class GameScreen : Screen {
   private val flashlight: SpotLight
   private val chunkManager: ChunkManager
   private val oceanRenderer: OceanRenderer
+  private val skyRenderer = SkyRenderer()
   private val hudStage: HudStage
 
   // Anti-pixelation terrain textures (diffuse + normal maps) & tri-planar shader
@@ -125,7 +126,7 @@ class GameScreen : Screen {
     ).apply {
       position.set(playerX, playerFeetY + currentEyeHeight, playerZ)
       near = 0.05f
-      far = 320f // island is ~160 m across, so keep the far shore inside the frustum
+      far = 320f // the fog swallows everything well before this; the sea fades to the sky colour at ~290 m
     }
     updateCameraOrientation()
 
@@ -195,6 +196,9 @@ class GameScreen : Screen {
     Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
     Gdx.gl.glClearColor(dayNight.skyColor.r, dayNight.skyColor.g, dayNight.skyColor.b, 1f)
     Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)
+
+    // Sun, moon and stars on top of the clear colour, before any geometry (no depth writes)
+    skyRenderer.render(camera, dayNight, dt)
 
     // Render 3D world with tri-planar normal-mapped shader & ground aim ring;
     // chunks outside the camera frustum are culled
@@ -617,6 +621,7 @@ class GameScreen : Screen {
     modelBatch.dispose()
     terrainShader.dispose()
     oceanRenderer.dispose()
+    skyRenderer.dispose()
     grassColorTex.dispose()
     grassNormalTex.dispose()
     dirtColorTex.dispose()

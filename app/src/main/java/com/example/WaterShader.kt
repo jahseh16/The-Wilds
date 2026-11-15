@@ -263,7 +263,10 @@ uniform mediump float u_spotLightIntensity;
 uniform mediump float u_spotLightCutoff;
 
 // Must match ShoreMap.DEPTH_RANGE
-const mediump float DEPTH_RANGE = 12.0;
+const mediump float DEPTH_RANGE = ${ShoreMap.DEPTH_RANGE};
+// The beaches are long gentle slopes (~7 %), so one metre of depth is ~14 m of sand. Foam is laid
+// out in 'depth x FOAM_DEPTH_SCALE' so the swash is a band a few metres wide instead of a smear.
+const mediump float FOAM_DEPTH_SCALE = 3.2;
 // 2*pi / 600 s. Every wave / foam phase below is an integer number of cycles per 600 s, so the
 // CPU can wrap u_time at 600 without any visible jump.
 const HP float TIME_TO_PHASE = 0.0104719755;
@@ -340,7 +343,7 @@ void main() {
     mediump vec3 lightScale = min(u_ambientColor + u_dirLightColor * (0.30 + 0.55 * ndl), vec3(1.1));
 
     // Body colour: turquoise shallows -> deep blue, lit by the current sun/moon/ambient
-    mediump float depthMix = smoothstep(0.0, 4.5, depth);
+    mediump float depthMix = smoothstep(0.0, 5.0, depth);
     mediump vec3 body = mix(SHALLOW_COLOR, DEEP_COLOR, depthMix) * lightScale;
 
     // Fresnel: looking straight down shows the body, grazing angles show the sky (fog colour)
@@ -362,7 +365,7 @@ void main() {
     mediump float wobble =
         0.16 * sin(v_worldPos.x * 1.7 + v_worldPos.z * 0.6 + ph * 120.0) +
         0.11 * sin(v_worldPos.z * 1.3 - v_worldPos.x * 0.5 - ph * 95.0);
-    mediump float edge = depth + wobble;
+    mediump float edge = (depth + wobble) * FOAM_DEPTH_SCALE;
     mediump float band = 1.0 - smoothstep(0.0, 0.35 + 0.65 * swash, edge);
     mediump float crest = 1.0 - smoothstep(0.0, 0.18, abs(edge - (0.9 + 0.8 * swash)));
     mediump float breakup = valueNoise(v_worldPos.xz * 1.6 + vec2(ph * 40.0, -ph * 30.0));

@@ -312,11 +312,10 @@ varying mediump vec3 v_worldNormal;
 varying mediump float v_skyOcc;
 """
 
-    // Texture-read budget per fragment: at most 3 colour reads (one per active tri-planar axis, a
-    // single scale) + 1 normal-map read = 4. Typical flat ground costs 2, and beyond ~75 m the
-    // normal map is skipped. Materials are NOT blended with each other (that would double the
-    // reads): one material is picked per pixel, with a noise-wobbled border so the grass/dirt/rock
-    // edges look organic instead of following the mesh normal like a contour line.
+    // Texture-read budget per fragment: at most 4 reads. Flat ground costs 2, and beyond ~75 m the
+    // normal map is skipped. Rock and soil are picked per pixel (noise-wobbled border); the one
+    // blend that exists, sand <-> grass, is only done inside its transition band using the dominant
+    // projection axis alone (2 colour + 2 normal reads), so it never exceeds the budget.
     private const val FRAGMENT_BODY = """
 uniform HP vec3 u_cameraPos;
 
@@ -351,6 +350,7 @@ const HP float NORMAL_FADE_START = 45.0;
 const HP float NORMAL_FADE_END = 75.0;
 // Ambient light that still reaches a fully buried point (the flashlight must do the work)
 const mediump float CAVE_AMBIENT_MIN = 0.05;
+const mediump vec3 SAND_COLOR = vec3(0.80, 0.69, 0.50);
 
 struct Proj {
     HP vec2 uv;
@@ -447,55 +447,92 @@ void main() {
     // smoothstep keeps entrances bright and makes anything under ~3 m of earth really dark.
     mediump float sky = smoothstep(0.04, 0.85, v_skyOcc);
 
-    // Two ALU-only noise octaves drive the material borders (ragged patches instead of straight
-    // contour lines); the low one also gives a slight brightness variation that hides repetition
+    // ALU-only noise (no texture reads): two octaves drive the rock border and a slight brightness
+    // variation that hides tiling; a third, very low one bends the sand/grass border into wide organic blotches
     HP vec2 noiseUv = v_worldPos.xz + v_worldPos.y * vec2(0.37, 0.71);
     mediump float n = valueNoise(noiseUv * 0.45);
     mediump float n2 = valueNoise(noiseUv * 2.3 + 17.0);
+    mediump float nLow = valueNoise(noiseUv * 0.07 + 41.0);
     mediump float brightness = mix(0.9, 1.1, n);
     mediump float jitter = (n * 0.55 + n2 * 0.45 - 0.5) * 1.1;
 
-    // Material scores: grass on flat exterior tops, dirt on slopes/walls, rock in tunnels
-    // (smoothstep edges kept ascending: reversed edges are undefined in GLSL). Grass needs sunlight
-    // and anything out of the sun turns to rock, so a tunnel floor is never grass.
-    mediump float grassW = smoothstep(0.66, 0.86, geomN.y) * smoothstep(-0.8, 0.5, v_worldPos.y) * sky;
+    // Grass amount g (0 = bare sand/dirt, 1 = full grass) is a CONTINUOUS function of height and
+    // slope, not a winner-takes-all pick, so the beach melts into the meadow. The height threshold is
+    // displaced by low-frequency noise (+-1 m, i.e. ~15 m sideways on a beach) so the border is an
+    // irregular wide gradient instead of a contour line, and the slope term fades grass out on steep
+    // ground over a wide range of normals. Grass also needs sunlight (sky): never inside a tunnel.
+    HP float ground = v_worldPos.y + (nLow - 0.5) * 2.0 + (n2 - 0.5) * 0.5;
+    mediump float heightT = smoothstep(0.7, 3.6, ground);
+    mediump float slopeT = smoothstep(0.62, 0.90, geomN.y + (n2 - 0.5) * 0.10);
+    // Alpine zone: grass thins out between ~22 and ~32 m and the rock takes over (noise-shifted)
+    HP float alt = v_worldPos.y + (nLow - 0.5) * 8.0;
+    mediump float g = heightT * slopeT * sky * (1.0 - smoothstep(22.0, 32.0, alt));
+
+    // Rock: underwater floor, overhangs, anything out of the sun, high peaks and steep mountain
+    // flanks. It still competes with the soil by (noisy) score; where grass is strong it never wins.
+    mediump float altRock = smoothstep(22.0, 34.0, alt);
+    mediump float steepRock = (1.0 - smoothstep(0.42, 0.62, geomN.y)) * smoothstep(6.0, 16.0, v_worldPos.y);
     mediump float rockBase = clamp(
         (1.0 - smoothstep(-2.4, 0.5, v_worldPos.y)) +
             (1.0 - smoothstep(-0.35, 0.20, geomN.y)) * 0.75 +
-            (1.0 - sky),
+            (1.0 - sky) + altRock + steepRock,
         0.0,
         1.0
     );
-    mediump float nonGrass = 1.0 - grassW;
-    mediump float scoreGrass = grassW + jitter;
-    mediump float scoreDirt = (1.0 - rockBase) * nonGrass;
-    mediump float scoreRock = rockBase * nonGrass - jitter * 0.6;
-
-    int matId = 1;
-    mediump float best = scoreDirt;
-    if (scoreGrass > best) {
-        matId = 0;
-        best = scoreGrass;
-    }
-    if (scoreRock > best) {
-        matId = 2;
-    }
+    bool isRock = rockBase * (1.0 - g) > 0.5 + 0.3 * jitter;
+    // Up in the mountains and on steep flanks the ground under the thinning grass is rock, never sand-coloured dirt
+    // (the switch happens where grass still covers ~90 %, so the change of the material under it is invisible)
+    bool alpine = alt > 23.0 || steepRock > 0.3;
+    bool bareRock = isRock || (g < 0.02 && alpine);
 
     mediump float normalAmount = 1.0 - smoothstep(NORMAL_FADE_START, NORMAL_FADE_END, camDist);
     bool useNormal = normalAmount > 0.0;
 
+    // Reads: bare rock or pure soil = up to 3 colour (one per active axis) + 1 normal. Only inside
+    // the grass transition band (sand/rock <-> grass) both materials are needed, and then only the
+    // dominant axis is sampled (2 colour + 2 normal = 4), so the budget of 4 holds everywhere.
     mediump vec3 albedo;
     mediump vec3 N = geomN;
-    if (matId == 0) {
-        albedo = sampleColor(u_grassColor, projX, projY, projZ, tw);
-        if (useNormal) N = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
-    } else if (matId == 1) {
-        albedo = sampleColor(u_dirtColor, projX, projY, projZ, tw);
-        if (useNormal) N = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
-    } else {
+    if (bareRock) {
         albedo = sampleColor(u_rockColor, projX, projY, projZ, tw);
         if (useNormal) N = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
+    } else if (g < 0.02) {
+        albedo = sampleColor(u_dirtColor, projX, projY, projZ, tw);
+        if (useNormal) N = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
+    } else if (g > 0.98) {
+        albedo = sampleColor(u_grassColor, projX, projY, projZ, tw);
+        if (useNormal) N = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
+    } else {
+        mediump vec3 grassCol = SAMPLE(u_grassColor, dom.uv, dom.dx, dom.dy).rgb;
+        mediump vec3 lowCol;
+        if (alpine) {
+            lowCol = SAMPLE(u_rockColor, dom.uv, dom.dx, dom.dy).rgb;
+        } else {
+            lowCol = SAMPLE(u_dirtColor, dom.uv, dom.dx, dom.dy).rgb;
+        }
+        albedo = mix(lowCol, grassCol, g);
+        if (useNormal) {
+            mediump vec3 nLowN;
+            if (alpine) {
+                nLowN = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
+            } else {
+                nLowN = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
+            }
+            mediump vec3 nGrass = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
+            N = normalize(mix(nLowN, nGrass, g));
+        }
     }
+
+    mediump float luma = dot(albedo, vec3(0.30, 0.59, 0.11));
+    if (!bareRock) {
+        // Beach sand: the dirt texture pushed towards pale sand on gentle ground between just below
+        // the waterline and the top of the beach (keeps its detail through the luminance)
+        mediump float sandAmount = (1.0 - g) * smoothstep(-2.4, -0.3, v_worldPos.y) *
+            (1.0 - smoothstep(2.4, 4.4, ground)) * smoothstep(0.55, 0.85, geomN.y);
+        albedo = mix(albedo, SAND_COLOR * (0.55 + 0.65 * luma), sandAmount * 0.6);
+    }
+    // Mountain rock cools towards grey with altitude (the rock texture itself is brownish)
+    albedo = mix(albedo, vec3(luma) * vec3(0.94, 0.97, 1.04), 0.6 * altRock);
     albedo *= brightness;
 
     // Ambient + Directional sun lighting, both scaled by the sky exposure

@@ -16,9 +16,9 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * A 16x32x16 column of the density field plus the GPU meshes generated from it.
+ * A 16x64x16 column of the density field plus the GPU meshes generated from it.
  *
- * Density storage owns one sample per cell *lower corner* (16 x 33 x 16: the 33 levels cover the
+ * Density storage owns one sample per cell *lower corner* (16 x 65 x 16: the 65 levels cover the
  * full height, there is no vertical neighbour). Samples on the +X / +Z faces of the chunk belong to
  * the neighbouring chunk, so [ChunkManager] resolves them across chunk borders; this removes seams
  * and means an edit is written in exactly one place.
@@ -37,6 +37,13 @@ class Chunk(
 
   /** Tight world-space bounds of the generated surface, used for frustum culling. */
   val bounds = BoundingBox()
+
+  /**
+   * Highest terrain surface (world Y) over this chunk's columns, border columns included, as
+   * generated. Excavation only ever removes earth, so nothing is solid above it and the mesher can
+   * skip every cell layer above.
+   */
+  var maxSurfaceY: Float = Float.NEGATIVE_INFINITY
 
   private class MeshSlice(
     val mesh: Mesh,
@@ -135,7 +142,7 @@ class Chunk(
 
   companion object {
     const val SIZE_X = 16
-    const val SIZE_Y = 32
+    const val SIZE_Y = 64
     const val SIZE_Z = 16
     const val GRID_Y = SIZE_Y + 1
 
@@ -159,5 +166,12 @@ class Chunk(
     )
 
     fun index(lx: Int, gy: Int, lz: Int): Int = (gy * SIZE_Z + lz) * SIZE_X + lx
+
+    /** Sparse-storage key of chunk (cx, cz): cx in the high 32 bits, cz in the low 32 bits. */
+    fun key(cx: Int, cz: Int): Long = (cx.toLong() shl 32) or (cz.toLong() and 0xFFFFFFFFL)
+
+    fun keyX(key: Long): Int = (key shr 32).toInt()
+
+    fun keyZ(key: Long): Int = key.toInt()
   }
 }

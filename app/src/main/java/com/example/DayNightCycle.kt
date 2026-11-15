@@ -68,6 +68,31 @@ class DayNightCycle(
   var sunElevation: Float = 0f
     private set
 
+  /** Unit vector from the viewer towards the sun (pointing below the horizon at night). */
+  val sunDirection = Vector3(0f, 1f, 0f)
+
+  /** Unit vector towards the moon: always exactly opposite the sun. */
+  val moonDirection = Vector3(0f, -1f, 0f)
+
+  /** 0 = sun disc not drawn (well below the horizon), 1 = fully visible. */
+  var sunVisibility: Float = 1f
+    private set
+
+  /** 0 by day, 1 at full night; fades the moon in as the sun sets and out at dawn. */
+  var moonVisibility: Float = 0f
+    private set
+
+  /** 0 by day, 1 at full night; the stars fade in once the sun is below the horizon. */
+  var starVisibility: Float = 0f
+    private set
+
+  /**
+   * Rotation of the star dome around [CELESTIAL_AXIS] in radians: one full turn per cycle, in step
+   * with the sun and the moon, so the stars wheel across the sky during the night.
+   */
+  val starAngle: Float
+    get() = timeOfDay * 2f * PI.toFloat()
+
   private val scratch = Color()
   private val sunPos = Vector3()
 
@@ -114,6 +139,11 @@ class DayNightCycle(
     val horizontal = sqrt(1f - elevation * elevation)
     sunPos.set(cos(angle) * horizontal, elevation, 0.35f * horizontal).nor()
     sunElevation = sunPos.y
+    sunDirection.set(sunPos)
+    moonDirection.set(sunPos).scl(-1f)
+    sunVisibility = smoothstep((sunElevation + 0.12f) / 0.20f)
+    moonVisibility = smoothstep((0.02f - sunElevation) / 0.25f)
+    starVisibility = smoothstep((0.10f - sunElevation) / 0.32f)
 
     if (sunElevation >= 0f) {
       val intensity = smoothstep(sunElevation / SUN_FULL_ELEVATION) * SUN_GAIN
@@ -141,6 +171,12 @@ class DayNightCycle(
 
   companion object {
     const val DEFAULT_CYCLE_SECONDS = 720f // 12 minutes
+
+    /**
+     * Axis the sun's arc turns around (perpendicular to its path: east -> zenith, with the slight
+     * southward lean of the arc). The star dome rotates around it.
+     */
+    val CELESTIAL_AXIS: Vector3 = Vector3(-0.330f, 0f, 0.944f)
 
     private const val SUN_GAIN = 0.95f
     private const val SUN_FULL_ELEVATION = 0.30f
