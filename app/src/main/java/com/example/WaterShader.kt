@@ -271,9 +271,13 @@ const mediump float FOAM_DEPTH_SCALE = 3.2;
 // CPU can wrap u_time at 600 without any visible jump.
 const HP float TIME_TO_PHASE = 0.0104719755;
 
-const mediump vec3 SHALLOW_COLOR = vec3(0.10, 0.62, 0.62);
-const mediump vec3 DEEP_COLOR = vec3(0.010, 0.140, 0.300);
-const mediump vec3 FOAM_COLOR = vec3(0.96, 0.98, 1.00);
+// Sombre, natural sea: murky grey-green shallows, dark navy deep water (tinted by the sky at run time)
+const mediump vec3 SHALLOW_COLOR = vec3(0.17, 0.25, 0.22);
+const mediump vec3 DEEP_COLOR = vec3(0.010, 0.040, 0.068);
+const mediump vec3 FOAM_COLOR = vec3(0.80, 0.84, 0.86);
+const mediump vec3 LUMA = vec3(0.30, 0.59, 0.11);
+// Water is see-through only in the first metres of depth (~1.7 m, a ~25 m strip of the long beaches)
+const mediump float CLEAR_DEPTH = 1.7;
 
 HP float hash21(HP vec2 p) {
     HP vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -343,21 +347,28 @@ void main() {
     mediump vec3 lightScale = min(u_ambientColor + u_dirLightColor * (0.30 + 0.55 * ndl), vec3(1.1));
 
     // Body colour: turquoise shallows -> deep blue, lit by the current sun/moon/ambient
-    mediump float depthMix = smoothstep(0.0, 5.0, depth);
-    mediump vec3 body = mix(SHALLOW_COLOR, DEEP_COLOR, depthMix) * lightScale;
+    mediump float depthMix = smoothstep(0.0, 2.0, depth);
+    // The deep colour picks up a little of the sky/fog tint: cold grey-green by day, warm and
+    // muted at dusk, almost black under the moon
+    mediump vec3 deepColor = DEEP_COLOR + u_fogColor * 0.055;
+    mediump vec3 waterColor = mix(SHALLOW_COLOR, deepColor, depthMix);
+    mediump vec3 body = waterColor * lightScale;
 
     // Fresnel: looking straight down shows the body, grazing angles show the sky (fog colour)
     // (computed from a flattened normal: at grazing angles the full wave slope flips the reflection
     // on and off per crest and turns into stripes)
     mediump vec3 Nf = normalize(vec3(-slope.x * 0.3, 1.0, -slope.y * 0.3));
     mediump float nv = clamp(dot(Nf, V), 0.0, 1.0);
-    mediump float fresnel = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
-    mediump vec3 col = mix(body, u_fogColor, fresnel);
+    mediump float fresnel = min(0.02 + 0.98 * pow(1.0 - nv, 5.0), 0.88);
+    // What the surface reflects: the sky, desaturated (overcast-ish by day, muted orange at dusk, dark at night)
+    mediump vec3 skyRefl = mix(vec3(dot(u_skyColor, LUMA)), u_skyColor, 0.55);
+    skyRefl = mix(skyRefl, u_fogColor, 0.4) * 0.9;
+    mediump vec3 col = mix(body, skyRefl, fresnel);
 
     // Sun / moon glints
     mediump vec3 H = normalize(L + V);
     mediump float nh = max(dot(N, H), 0.0);
-    mediump float spec = pow(nh, 220.0) * 1.8 + pow(nh, 28.0) * 0.12;
+    mediump float spec = pow(nh, 220.0) * 1.1 + pow(nh, 28.0) * 0.07;
 
     // Foam: a washing band that breathes in and out (6 s) along the shore, a thin crest line
     // travelling out from it, both broken up by noise
@@ -366,14 +377,18 @@ void main() {
         0.16 * sin(v_worldPos.x * 1.7 + v_worldPos.z * 0.6 + ph * 120.0) +
         0.11 * sin(v_worldPos.z * 1.3 - v_worldPos.x * 0.5 - ph * 95.0);
     mediump float edge = (depth + wobble) * FOAM_DEPTH_SCALE;
-    mediump float band = 1.0 - smoothstep(0.0, 0.35 + 0.65 * swash, edge);
-    mediump float crest = 1.0 - smoothstep(0.0, 0.18, abs(edge - (0.9 + 0.8 * swash)));
-    mediump float breakup = valueNoise(v_worldPos.xz * 1.6 + vec2(ph * 40.0, -ph * 30.0));
-    mediump float foam = clamp(band + crest * 0.7, 0.0, 1.0) * smoothstep(0.30, 0.62, breakup + band * 0.35);
+    // Soft, wide edges and a broken-up mask: a wash of surf on the sand, not a painted white line
+    mediump float band = 1.0 - smoothstep(0.0, 0.55 + 0.9 * swash, edge);
+    band *= band;
+    mediump float crest = (1.0 - smoothstep(0.0, 0.34, abs(edge - (1.1 + 1.0 * swash)))) * 0.4;
+    mediump float breakup = valueNoise(v_worldPos.xz * 1.1 + vec2(ph * 40.0, -ph * 30.0));
+    mediump float breakup2 = valueNoise(v_worldPos.xz * 3.7 - vec2(ph * 55.0, ph * 20.0));
+    mediump float lacy = mix(breakup, breakup2, 0.4);
+    mediump float foam = clamp(band + crest, 0.0, 1.0) * smoothstep(0.22, 0.78, lacy + band * 0.30);
 
     col += u_dirLightColor * spec * (1.0 - foam);
     mediump vec3 foamLight = min(u_ambientColor + u_dirLightColor * 0.85, vec3(1.0));
-    col = mix(col, FOAM_COLOR * foamLight, foam * 0.95);
+    col = mix(col, FOAM_COLOR * foamLight, foam * 0.68);
 
     // Flashlight on the water surface
     if (u_spotLightIntensity > 0.001) {
@@ -388,16 +403,16 @@ void main() {
             mediump vec3 halfDir = normalize(spotL + V);
             mediump float spotSpec = pow(max(dot(N, halfDir), 0.0), 60.0) * 0.5;
             mediump float spotDiff = max(dot(N, spotL), 0.0);
-            col += (mix(SHALLOW_COLOR, DEEP_COLOR, depthMix) * spotDiff * 0.6 + vec3(spotSpec)) *
+            col += (waterColor * spotDiff * 0.6 + vec3(spotSpec)) *
                 u_spotLightColor * pow(cone, 1.35) * atten;
         }
     }
 
-    // Transparent in the shallows (the sea bed shows through), opaque far out; reflections and
-    // foam are always visible; the very edge fades so there is no hard line on the sand
-    mediump float alpha = mix(0.25, 0.95, smoothstep(0.0, 3.2, depth));
+    // Transparent only in the very shallow strip next to the shore (the sea bed shows through),
+    // opaque dark water beyond it; reflections and foam are always visible; the very edge fades so there is no hard line on the sand
+    mediump float alpha = mix(0.20, 0.97, smoothstep(0.0, CLEAR_DEPTH, depth));
     alpha = max(alpha, fresnel);
-    alpha = mix(alpha, 0.98, foam);
+    alpha = mix(alpha, 0.85, foam * 0.7);
     alpha *= smoothstep(-0.04, 0.10, depth);
 
     col = mix(col, fogTarget, fogAmount);

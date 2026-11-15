@@ -153,4 +153,36 @@ class DayNightCycleTest {
     // Dawn: stars are gone again
     assertEquals(0f, DayNightCycle(DayPhase.DAWN).starVisibility, 0f)
   }
+
+  private fun saturation(c: Color): Float {
+    val max = maxOf(c.r, c.g, c.b)
+    return if (max <= 0f) 0f else (max - minOf(c.r, c.g, c.b)) / max
+  }
+
+  @Test
+  fun theDaylightPaletteIsNaturalAndDesaturated() {
+    val day = DayNightCycle(DayPhase.DAY)
+    // No saturated cartoon blue: sky, haze and ambient stay grey-blue
+    assertTrue("sky ${saturation(day.skyColor)}", saturation(day.skyColor) < 0.40f)
+    assertTrue("fog ${saturation(day.fogColor)}", saturation(day.fogColor) < 0.36f)
+    assertTrue("ambient ${saturation(day.ambientColor)}", saturation(day.ambientColor) < 0.15f)
+    // Haze is a touch lighter than the sky but close to it, so the horizon has no visible band
+    assertTrue(abs(luminance(day.fogColor) - luminance(day.skyColor)) < 0.12f)
+    // Dusk keeps a muted orange rather than a saturated one
+    assertTrue(saturation(DayNightCycle(DayPhase.DUSK).skyColor) < 0.55f)
+  }
+
+  @Test
+  fun byDayFarLandAndTheSeaHorizonStayReadable() {
+    val day = DayNightCycle(DayPhase.DAY)
+    fun fogAt(metres: Float): Float {
+      val arg = metres * day.fogDensity
+      return 1f - kotlin.math.exp(-arg * arg)
+    }
+    assertTrue("haze at 100 m: ${fogAt(100f)}", fogAt(100f) < 0.06f)
+    assertTrue("haze at 300 m: ${fogAt(300f)}", fogAt(300f) < 0.40f)
+    // Night stays closed in
+    val night = DayNightCycle(DayPhase.NIGHT)
+    assertTrue(night.fogDensity > day.fogDensity * 3f)
+  }
 }

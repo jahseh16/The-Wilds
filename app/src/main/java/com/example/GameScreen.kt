@@ -126,7 +126,7 @@ class GameScreen : Screen {
     ).apply {
       position.set(playerX, playerFeetY + currentEyeHeight, playerZ)
       near = 0.05f
-      far = 320f // the fog swallows everything well before this; the sea fades to the sky colour at ~290 m
+      far = 520f // the sea fades into the horizon haze well before this (see WaterShader)
     }
     updateCameraOrientation()
 
@@ -182,6 +182,9 @@ class GameScreen : Screen {
     dayNight.update(dt)
     dayNight.applyTo(environment, sunLight)
     terrainShader.fogDensity = dayNight.fogDensity
+    // The streamed terrain melts into the fog before it ends, so the edge of the loaded area is never a cut
+    terrainShader.fadeEnd = chunkManager.solidTerrainRadius
+    terrainShader.fadeStart = chunkManager.solidTerrainRadius * 0.62f
     hudStage.setPhaseLabel(dayNight.phase.label)
 
     updatePlayerPhysics(dt)

@@ -47,6 +47,7 @@ class TerrainShader(
 
   private var uFogColorLoc = -1
   private var uFogDensityLoc = -1
+  private var uFadeRangeLoc = -1
 
   private var uSpotLightColorLoc = -1
   private var uSpotLightPosLoc = -1
@@ -62,6 +63,13 @@ class TerrainShader(
    * has no standard attribute for it.
    */
   var fogDensity: Float = 0f
+
+  /**
+   * Terrain fades completely into the fog colour between these two camera distances (metres), so
+   * the end of the streamed area (see [ChunkManager.solidTerrainRadius]) is hidden in the haze.
+   */
+  var fadeStart: Float = 1e6f
+  var fadeEnd: Float = 2e6f
 
   /**
    * Trilinear mipmapping plus anisotropic filtering (when the GPU exposes it) for a terrain texture.
@@ -118,6 +126,7 @@ class TerrainShader(
 
     uFogColorLoc = program.getUniformLocation("u_fogColor")
     uFogDensityLoc = program.getUniformLocation("u_fogDensity")
+    uFadeRangeLoc = program.getUniformLocation("u_fadeRange")
 
     uSpotLightColorLoc = program.getUniformLocation("u_spotLightColor")
     uSpotLightPosLoc = program.getUniformLocation("u_spotLightPos")
@@ -150,6 +159,7 @@ class TerrainShader(
     program.setUniformf(uUvScaleLoc, TRIPLANAR_UV_SCALE)
     program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH)
     program.setUniformf(uFogDensityLoc, fogDensity)
+    program.setUniformf(uFadeRangeLoc, fadeStart, fadeEnd)
   }
 
   override fun render(renderable: Renderable) {
@@ -335,6 +345,7 @@ uniform mediump vec3 u_dirLightDir;
 
 uniform mediump vec3 u_fogColor;
 uniform mediump float u_fogDensity;
+uniform HP vec2 u_fadeRange;
 
 uniform mediump vec3 u_spotLightColor;
 uniform HP vec3 u_spotLightPos;
@@ -350,7 +361,10 @@ const HP float NORMAL_FADE_START = 45.0;
 const HP float NORMAL_FADE_END = 75.0;
 // Ambient light that still reaches a fully buried point (the flashlight must do the work)
 const mediump float CAVE_AMBIENT_MIN = 0.05;
-const mediump vec3 SAND_COLOR = vec3(0.80, 0.69, 0.50);
+// Natural, desaturated palette (moss, wet earth, grey rock, pale grey-beige sand). The textures are
+// graded in the shader (pure ALU) so no art assets change.
+const mediump vec3 SAND_COLOR = vec3(0.60, 0.565, 0.50);
+const mediump vec3 LUMA = vec3(0.30, 0.59, 0.11);
 
 struct Proj {
     HP vec2 uv;
@@ -384,6 +398,13 @@ mediump float valueNoise(HP vec2 p) {
     mediump float d = hash21(i + vec2(1.0, 1.0));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+
+mediump vec3 desat(mediump vec3 c, mediump float amount) {
+    return mix(vec3(dot(c, LUMA)), c, amount);
+}
+mediump vec3 gradeGrass(mediump vec3 c) { return desat(c, 0.60) * vec3(0.76, 0.87, 0.68); }
+mediump vec3 gradeDirt(mediump vec3 c) { return desat(c, 0.50) * vec3(0.68, 0.64, 0.60); }
+mediump vec3 gradeRock(mediump vec3 c) { return desat(c, 0.50) * vec3(0.86, 0.87, 0.88); }
 
 // Tri-planar colour of one material; weights tw sum to 1 and fade smoothly to 0.
 // Each active axis costs exactly one texture read.
@@ -494,21 +515,21 @@ void main() {
     mediump vec3 albedo;
     mediump vec3 N = geomN;
     if (bareRock) {
-        albedo = sampleColor(u_rockColor, projX, projY, projZ, tw);
+        albedo = gradeRock(sampleColor(u_rockColor, projX, projY, projZ, tw));
         if (useNormal) N = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
     } else if (g < 0.02) {
-        albedo = sampleColor(u_dirtColor, projX, projY, projZ, tw);
+        albedo = gradeDirt(sampleColor(u_dirtColor, projX, projY, projZ, tw));
         if (useNormal) N = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
     } else if (g > 0.98) {
-        albedo = sampleColor(u_grassColor, projX, projY, projZ, tw);
+        albedo = gradeGrass(sampleColor(u_grassColor, projX, projY, projZ, tw));
         if (useNormal) N = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
     } else {
-        mediump vec3 grassCol = SAMPLE(u_grassColor, dom.uv, dom.dx, dom.dy).rgb;
+        mediump vec3 grassCol = gradeGrass(SAMPLE(u_grassColor, dom.uv, dom.dx, dom.dy).rgb);
         mediump vec3 lowCol;
         if (alpine) {
-            lowCol = SAMPLE(u_rockColor, dom.uv, dom.dx, dom.dy).rgb;
+            lowCol = gradeRock(SAMPLE(u_rockColor, dom.uv, dom.dx, dom.dy).rgb);
         } else {
-            lowCol = SAMPLE(u_dirtColor, dom.uv, dom.dx, dom.dy).rgb;
+            lowCol = gradeDirt(SAMPLE(u_dirtColor, dom.uv, dom.dx, dom.dy).rgb);
         }
         albedo = mix(lowCol, grassCol, g);
         if (useNormal) {
@@ -523,16 +544,16 @@ void main() {
         }
     }
 
-    mediump float luma = dot(albedo, vec3(0.30, 0.59, 0.11));
+    mediump float luma = dot(albedo, LUMA);
     if (!bareRock) {
-        // Beach sand: the dirt texture pushed towards pale sand on gentle ground between just below
-        // the waterline and the top of the beach (keeps its detail through the luminance)
+        // Beach sand: the graded dirt pushed towards pale grey-beige sand on gentle ground between just
+        // below the waterline and the top of the beach (keeps its detail through the luminance)
         mediump float sandAmount = (1.0 - g) * smoothstep(-2.4, -0.3, v_worldPos.y) *
-            (1.0 - smoothstep(2.4, 4.4, ground)) * smoothstep(0.55, 0.85, geomN.y);
-        albedo = mix(albedo, SAND_COLOR * (0.55 + 0.65 * luma), sandAmount * 0.6);
+            (1.0 - smoothstep(2.4, 4.4, ground)) * smoothstep(0.45, 0.70, geomN.y);
+        albedo = mix(albedo, SAND_COLOR * (0.60 + 0.90 * luma), sandAmount * 0.85);
     }
     // Mountain rock cools towards grey with altitude (the rock texture itself is brownish)
-    albedo = mix(albedo, vec3(luma) * vec3(0.94, 0.97, 1.04), 0.6 * altRock);
+    albedo = mix(albedo, vec3(luma) * vec3(0.94, 0.97, 1.04), 0.5 * altRock);
     albedo *= brightness;
 
     // Ambient + Directional sun lighting, both scaled by the sky exposure
@@ -567,6 +588,8 @@ void main() {
     // Exponential-squared distance fog (colour follows the sky so distant terrain melts into it)
     HP float fogArg = camDist * u_fogDensity;
     mediump float fogAmount = clamp(1.0 - exp(-fogArg * fogArg), 0.0, 1.0);
+    // Streamed-area edge: hazed out completely before the last chunk, never a visible cut
+    fogAmount = max(fogAmount, smoothstep(u_fadeRange.x, u_fadeRange.y, camDist));
     lighting = mix(lighting, u_fogColor, fogAmount);
 
     fragColor = vec4(lighting, 1.0);

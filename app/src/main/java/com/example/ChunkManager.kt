@@ -141,6 +141,14 @@ class ChunkManager(
   val loadedChunkCount: Int
     get() = residentChunks.size
 
+  /**
+   * Distance from the player up to which terrain is guaranteed to exist in every direction: the
+   * load radius minus the half diagonal of a chunk (a chunk is loaded when its CENTRE is in range).
+   * The terrain shader fades into the fog just before it, so the edge of the world is never a cut.
+   */
+  val solidTerrainRadius: Float
+    get() = loadRadius - chunkSpanX * 0.75f
+
   /** Number of chunks queued to be generated (nearest first), one per [update] call. */
   val pendingChunkCount: Int
     get() = loadQueue.size
@@ -896,8 +904,12 @@ class ChunkManager(
     /** 500 m radius = a 1 km island. */
     const val DEFAULT_ISLAND_RADIUS = IslandTerrain.REFERENCE_RADIUS
 
-    /** Chunks within this many chunks (16 m each, ~80 m) of the player stay resident, in all directions. */
-    const val LOAD_RADIUS_CHUNKS = 5
+    /**
+     * Chunks within this many chunks (16 m each, ~112 m) of the player stay resident, in all
+     * directions. Raised from 5 so that, from the hills, enough land is visible before the fog
+     * takes over; see [solidTerrainRadius].
+     */
+    const val LOAD_RADIUS_CHUNKS = 7
 
     /**
      * Extra margin before a loaded chunk is released, so walking back and forth along the edge of

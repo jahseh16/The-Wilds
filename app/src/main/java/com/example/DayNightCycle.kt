@@ -184,29 +184,33 @@ class DayNightCycle(
     private const val MOON_GAIN = 0.22f
     private const val MOON_FULL_ELEVATION = 0.30f
 
-    private val SUN_WARM = Color(1.00f, 0.55f, 0.30f, 1f)
-    private val SUN_WHITE = Color(1.00f, 0.96f, 0.88f, 1f)
+    private val SUN_WARM = Color(0.98f, 0.60f, 0.36f, 1f)
+    private val SUN_WHITE = Color(0.96f, 0.93f, 0.86f, 1f)
     private val MOON = Color(0.50f, 0.62f, 0.95f, 1f)
 
     // Keyframes, indexed like DayPhase.ordinal: DAWN, DAY, DUSK, NIGHT
+    // Natural, desaturated palette: a slightly overcast blue-grey day, muted amber at the horizon
+    // at dawn and dusk. The fog is a touch lighter than the sky so the far land and sea read as haze.
     private val SKY = arrayOf(
-      Color(0.93f, 0.60f, 0.42f, 1f),
-      Color(0.45f, 0.65f, 0.85f, 1f),
-      Color(0.90f, 0.45f, 0.28f, 1f),
+      Color(0.76f, 0.58f, 0.47f, 1f),
+      Color(0.43f, 0.55f, 0.68f, 1f),
+      Color(0.72f, 0.45f, 0.33f, 1f),
       Color(0.015f, 0.025f, 0.06f, 1f)
     )
     private val FOG = arrayOf(
-      Color(0.90f, 0.62f, 0.50f, 1f),
-      Color(0.62f, 0.76f, 0.90f, 1f),
-      Color(0.86f, 0.50f, 0.34f, 1f),
+      Color(0.79f, 0.61f, 0.50f, 1f),
+      Color(0.47f, 0.58f, 0.70f, 1f),
+      Color(0.74f, 0.47f, 0.35f, 1f),
       Color(0.015f, 0.022f, 0.05f, 1f)
     )
     private val AMBIENT = arrayOf(
-      Color(0.40f, 0.34f, 0.38f, 1f),
-      Color(0.50f, 0.50f, 0.50f, 1f),
-      Color(0.40f, 0.31f, 0.30f, 1f),
+      Color(0.38f, 0.34f, 0.35f, 1f),
+      Color(0.44f, 0.47f, 0.50f, 1f),
+      Color(0.37f, 0.31f, 0.30f, 1f),
       Color(0.030f, 0.040f, 0.085f, 1f)
     )
-    private val FOG_DENSITY = floatArrayOf(0.0080f, 0.0035f, 0.0070f, 0.0110f)
+    // Exponential-squared fog density (1/m). Lower than before so far hills and the sea horizon stay
+    // readable: by day ~20 % haze at 200 m and ~70 % at 450 m; night keeps the closed-in feeling.
+    private val FOG_DENSITY = floatArrayOf(0.0042f, 0.0020f, 0.0038f, 0.0085f)
   }
 }
