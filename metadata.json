@@ -1,0 +1,6 @@
+{
+  "name": "The Forest",
+  "description": "First-person 3D exploration game in Kotlin and LibGDX.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
