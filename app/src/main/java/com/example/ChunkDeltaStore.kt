@@ -23,6 +23,9 @@ class ChunkDeltaStore {
     return map.get(localIndex, Float.NaN)
   }
 
+  /** True if any sample of chunk [chunkKey] was ever edited. */
+  fun hasEdits(chunkKey: Long): Boolean = perChunk.containsKey(chunkKey)
+
   fun put(chunkKey: Long, localIndex: Int, density: Float) {
     perChunk.getOrPut(chunkKey) { IntFloatMap() }.put(localIndex, density)
   }

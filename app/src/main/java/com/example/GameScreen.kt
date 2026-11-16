@@ -54,6 +54,17 @@ class GameScreen : Screen {
   private val rockColorTex: Texture
   private val rockNormalTex: Texture
   private val terrainShader: TerrainShader
+  private val forestColorTex: Texture
+  private val forestNormalTex: Texture
+  private val gravelColorTex: Texture
+  private val gravelNormalTex: Texture
+
+  // Ecosystem: trees, rocks, ground cover (batched per chunk) and its shader / atlases
+  private val populator: WorldPopulator
+  private val foliageShader: FoliageShader
+  private val solidAtlas: Texture
+  private val cutoutAtlas: Texture
+  private var foliageClock = 0f
 
   // First-person 3D shovel viewmodel
   private val shovelModel: Model
@@ -90,6 +101,18 @@ class GameScreen : Screen {
     chunkManager = ChunkManager()
     // Spawn on dry land as close to the island centre as possible (never in the water)
     val spawn = chunkManager.findDrySpawn(Vector3())
+    // Atlases + models first: the populator must be listening before the first chunk loads
+    solidAtlas = AtlasBuilder.build(Layer.SOLID)
+    cutoutAtlas = AtlasBuilder.build(Layer.CUTOUT)
+    foliageShader = FoliageShader().apply { init() }
+    populator = WorldPopulator(
+      chunkManager,
+      ScatterModels { path -> Gdx.files.internal(path).readString() },
+      solidAtlas,
+      cutoutAtlas,
+      listOf(Clearing(spawn.x, spawn.z, ChunkManager.SPAWN_CLEARING_RADIUS))
+    )
+    chunkManager.addListener(populator)
     playerX = spawn.x
     playerZ = spawn.z
     playerFeetY = spawn.y
@@ -139,6 +162,10 @@ class GameScreen : Screen {
     dirtNormalTex = loadTerrainTexture("textures/dirt_normal.png")
     rockColorTex = loadTerrainTexture("textures/rock_color.png")
     rockNormalTex = loadTerrainTexture("textures/rock_normal.png")
+    forestColorTex = loadTerrainTexture("textures/terrain/forest_floor_diff.jpg")
+    forestNormalTex = loadTerrainTexture("textures/terrain/forest_floor_nor.jpg")
+    gravelColorTex = loadTerrainTexture("textures/terrain/gravel_leaves_diff.jpg")
+    gravelNormalTex = loadTerrainTexture("textures/terrain/gravel_leaves_nor.jpg")
 
     terrainShader = TerrainShader(
       grassColor = grassColorTex,
@@ -146,7 +173,11 @@ class GameScreen : Screen {
       dirtColor = dirtColorTex,
       dirtNormal = dirtNormalTex,
       rockColor = rockColorTex,
-      rockNormal = rockNormalTex
+      rockNormal = rockNormalTex,
+      forestColor = forestColorTex,
+      forestNormal = forestNormalTex,
+      gravelColor = gravelColorTex,
+      gravelNormal = gravelNormalTex
     ).apply {
       init()
     }
@@ -173,6 +204,7 @@ class GameScreen : Screen {
     // The terrain only needs to know where the player is (streams chunks in/out, max 1 per frame)
     streamingPos.set(playerX, playerFeetY, playerZ)
     chunkManager.update(streamingPos, dt)
+    populator.update(streamingPos)
 
     // Day/night: advance the clock (the HUD pill can jump to the next phase), then push sky,
     // fog, ambient and sun into the environment and the terrain shader
@@ -185,6 +217,11 @@ class GameScreen : Screen {
     // The streamed terrain melts into the fog before it ends, so the edge of the loaded area is never a cut
     terrainShader.fadeEnd = chunkManager.solidTerrainRadius
     terrainShader.fadeStart = chunkManager.solidTerrainRadius * 0.62f
+    foliageClock = (foliageClock + dt) % 3600f
+    foliageShader.time = foliageClock
+    foliageShader.fogDensity = dayNight.fogDensity
+    foliageShader.fadeEnd = terrainShader.fadeEnd
+    foliageShader.fadeStart = terrainShader.fadeStart
     hudStage.setPhaseLabel(dayNight.phase.label)
 
     updatePlayerPhysics(dt)
@@ -207,6 +244,7 @@ class GameScreen : Screen {
     // chunks outside the camera frustum are culled
     modelBatch.begin(camera)
     chunkManager.renderVisible(modelBatch, environment, terrainShader, camera.frustum)
+    populator.render(modelBatch, environment, foliageShader, camera.frustum)
     if (hasAimHit) {
       modelBatch.render(chunkManager.aimIndicatorInstance)
     }
@@ -313,6 +351,9 @@ class GameScreen : Screen {
       chunkManager.minZ + TERRAIN_EDGE_MARGIN,
       chunkManager.maxZ - TERRAIN_EDGE_MARGIN
     )
+
+    // Tree trunks and boulders are solid cylinders (moving away from one is always allowed)
+    if (populator.blocks(playerX, playerZ, targetX, targetZ, playerFeetY, bodyHeight, PLAYER_RADIUS)) return
 
     if (!isGrounded) {
       if (!collidesBodyCylinder(targetX, playerFeetY, targetZ, bodyHeight, includeFeet = true)) {
@@ -625,12 +666,20 @@ class GameScreen : Screen {
     terrainShader.dispose()
     oceanRenderer.dispose()
     skyRenderer.dispose()
+    populator.dispose()
+    foliageShader.dispose()
+    solidAtlas.dispose()
+    cutoutAtlas.dispose()
     grassColorTex.dispose()
     grassNormalTex.dispose()
     dirtColorTex.dispose()
     dirtNormalTex.dispose()
     rockColorTex.dispose()
     rockNormalTex.dispose()
+    forestColorTex.dispose()
+    forestNormalTex.dispose()
+    gravelColorTex.dispose()
+    gravelNormalTex.dispose()
     shovelModel.dispose()
     chunkManager.dispose()
     soundManager.dispose()

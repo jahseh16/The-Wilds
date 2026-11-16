@@ -49,40 +49,92 @@ class IslandTerrainTest {
     }
   }
 
-  @Test
-  fun beachesAreWideAndGentle() {
-    for (i in 0 until 12) {
-      val angle = (2.0 * PI * i / 12).toFloat()
-      // Walk inland from the sea floor with 1 m steps until the water line
-      var d = radius
-      while (d > 0f && along(angle, d) < 0f) d -= 1f
-      val shoreDistance = d
-      // From the waterline up to 3 m of height: a broad slope, never steeper than 15 %
-      var maxSlope = 0f
-      var beachWidth = 0f
-      var p = shoreDistance
-      while (p > shoreDistance - 150f && along(angle, p) < 3f) {
-        maxSlope = maxOf(maxSlope, abs(along(angle, p - 1f) - along(angle, p)))
-        beachWidth += 1f
-        p -= 1f
-      }
-      assertTrue("angle $i: beach slope $maxSlope", maxSlope < 0.15f)
-      assertTrue("angle $i: beach only $beachWidth m wide", beachWidth > 25f)
-    }
+  private fun shoreDistance(angle: Float): Float {
+    var d = radius
+    while (d > 0f && along(angle, d) < 0f) d -= 1f
+    return d
   }
 
   @Test
-  fun theBeachIsSmoothSand() {
-    // Noise is faded out on the beach: the height above the waterline follows one smooth curve, so
-    // the second difference over 4 m stays tiny
-    val angle = 0.7f
-    var d = radius
-    while (along(angle, d) < 0f) d -= 1f
-    var p = d
-    while (along(angle, p) < 2.5f) {
-      val curvature = abs(along(angle, p + 4f) - 2f * along(angle, p) + along(angle, p - 4f))
-      assertTrue("curvature $curvature at $p", curvature < 0.35f)
-      p -= 2f
+  fun coastsAlternateBetweenWalkableCovesAndAbruptCliffs() {
+    var coves = 0
+    var cliffs = 0
+    for (i in 0 until 24) {
+      val angle = (2.0 * PI * i / 24).toFloat()
+      val shore = shoreDistance(angle)
+      var maxSlope = 0f
+      var width = 0f
+      var p = shore
+      while (p > shore - 150f && along(angle, p) < 3f) {
+        maxSlope = maxOf(maxSlope, abs(along(angle, p - 1f) - along(angle, p)))
+        width += 1f
+        p -= 1f
+      }
+      if (width > 25f && maxSlope < 0.15f) coves++
+      if (width < 20f && maxSlope > 0.25f) cliffs++
+    }
+    assertTrue("walkable cove beaches: $coves of 24", coves >= 5)
+    assertTrue("abrupt cliff coasts: $cliffs of 24", cliffs >= 4)
+  }
+
+  @Test
+  fun theReliefIsRuggedNotASmoothRamp() {
+    // Land well inland: a good share of the ground is steep (cliffs, gullies, terraces) and some of it is gentle
+    var steep = 0; var gentle = 0; var n = 0
+    var z = 100f
+    while (z < 900f) {
+      var x = 100f
+      while (x < 900f) {
+        val h = island.heightAt(x, z)
+        if (h > 3f) {
+          val s = maxOf(abs(island.heightAt(x + 2f, z) - h), abs(island.heightAt(x, z + 2f) - h)) / 2f
+          n++
+          if (s > 0.5f) steep++
+          if (s < 0.15f) gentle++
+        }
+        x += 6f
+      }
+      z += 6f
+    }
+    assertTrue("steep ground share ${steep.toFloat() / n}", steep.toFloat() / n > 0.05f)
+    assertTrue("gentle ground share ${gentle.toFloat() / n}", gentle.toFloat() / n > 0.25f)
+  }
+
+  @Test
+  fun biomesCoverForestGravelAndOpenGround() {
+    val out = FloatArray(4)
+    var forest = 0; var gravel = 0; var open = 0; var n = 0
+    var z = 100f
+    while (z < 900f) {
+      var x = 100f
+      while (x < 900f) {
+        island.biomeAt(x, z, out)
+        assertTrue(out[0] in 0f..1f && out[1] in 0f..1f)
+        if (out[2] > 2f) {
+          n++
+          if (out[0] > 0.5f) forest++
+          if (out[1] > 0.5f) gravel++
+          if (out[0] < 0.1f && out[1] < 0.3f && out[3] < 0.25f) open++
+        }
+        x += 8f
+      }
+      z += 8f
+    }
+    assertTrue("forest ${forest.toFloat() / n}", forest.toFloat() / n in 0.10f..0.55f)
+    assertTrue("gravel ${gravel.toFloat() / n}", gravel.toFloat() / n in 0.05f..0.45f)
+    assertTrue("open ground ${open.toFloat() / n}", open.toFloat() / n > 0.10f)
+  }
+
+  @Test
+  fun noForestInTheWaterOrOnTheBeach() {
+    val out = FloatArray(4)
+    for (i in 0 until 24) {
+      val angle = (2.0 * PI * i / 24).toFloat()
+      val shore = shoreDistance(angle)
+      island.biomeAt(centre + cos(angle) * (shore + 10f), centre + sin(angle) * (shore + 10f), out)
+      assertEquals("forest at sea", 0f, out[0], 0f)
+      island.biomeAt(centre + cos(angle) * (shore - 2f), centre + sin(angle) * (shore - 2f), out)
+      assertEquals("forest on the waterline", 0f, out[0], 0f)
     }
   }
 

@@ -22,7 +22,11 @@ class TerrainShader(
   private val dirtColor: Texture,
   private val dirtNormal: Texture,
   private val rockColor: Texture,
-  private val rockNormal: Texture
+  private val rockNormal: Texture,
+  private val forestColor: Texture,
+  private val forestNormal: Texture,
+  private val gravelColor: Texture,
+  private val gravelNormal: Texture
 ) : Shader {
 
   private lateinit var program: ShaderProgram
@@ -37,6 +41,10 @@ class TerrainShader(
   private var uDirtNormalLoc = -1
   private var uRockColorLoc = -1
   private var uRockNormalLoc = -1
+  private var uForestColorLoc = -1
+  private var uForestNormalLoc = -1
+  private var uGravelColorLoc = -1
+  private var uGravelNormalLoc = -1
 
   private var uUvScaleLoc = -1
   private var uNormalStrengthLoc = -1
@@ -93,7 +101,10 @@ class TerrainShader(
   }
 
   override fun init() {
-    listOf(grassColor, grassNormal, dirtColor, dirtNormal, rockColor, rockNormal)
+    listOf(
+      grassColor, grassNormal, dirtColor, dirtNormal, rockColor, rockNormal,
+      forestColor, forestNormal, gravelColor, gravelNormal
+    )
       .forEach(::configureTerrainTexture)
 
     val useEs30 = Gdx.gl30 != null
@@ -116,6 +127,10 @@ class TerrainShader(
     uDirtNormalLoc = program.getUniformLocation("u_dirtNormal")
     uRockColorLoc = program.getUniformLocation("u_rockColor")
     uRockNormalLoc = program.getUniformLocation("u_rockNormal")
+    uForestColorLoc = program.getUniformLocation("u_forestColor")
+    uForestNormalLoc = program.getUniformLocation("u_forestNormal")
+    uGravelColorLoc = program.getUniformLocation("u_gravelColor")
+    uGravelNormalLoc = program.getUniformLocation("u_gravelNormal")
 
     uUvScaleLoc = program.getUniformLocation("u_uvScale")
     uNormalStrengthLoc = program.getUniformLocation("u_normalStrength")
@@ -155,6 +170,10 @@ class TerrainShader(
     program.setUniformi(uDirtNormalLoc, context.textureBinder.bind(dirtNormal))
     program.setUniformi(uRockColorLoc, context.textureBinder.bind(rockColor))
     program.setUniformi(uRockNormalLoc, context.textureBinder.bind(rockNormal))
+    program.setUniformi(uForestColorLoc, context.textureBinder.bind(forestColor))
+    program.setUniformi(uForestNormalLoc, context.textureBinder.bind(forestNormal))
+    program.setUniformi(uGravelColorLoc, context.textureBinder.bind(gravelColor))
+    program.setUniformi(uGravelNormalLoc, context.textureBinder.bind(gravelNormal))
 
     program.setUniformf(uUvScaleLoc, TRIPLANAR_UV_SCALE)
     program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH)
@@ -242,13 +261,14 @@ class TerrainShader(
 
   private companion object {
     const val TRIPLANAR_UV_SCALE = 0.35f
-    const val NORMAL_MAP_STRENGTH = 1.25f
+    const val NORMAL_MAP_STRENGTH = 1.45f
     const val MAX_ANISOTROPY = 4f
 
     private const val VERTEX_SHADER_ES30 = """#version 300 es
 in vec3 a_position;
 in vec3 a_normal;
 in float a_skyOcclusion;
+in vec2 a_biome;
 
 uniform mat4 u_projViewTrans;
 uniform mat4 u_worldTrans;
@@ -256,12 +276,14 @@ uniform mat4 u_worldTrans;
 out highp vec3 v_worldPos;
 out mediump vec3 v_worldNormal;
 out mediump float v_skyOcc;
+out mediump vec2 v_biome;
 
 void main() {
     vec4 worldPos = u_worldTrans * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_worldNormal = normalize(mat3(u_worldTrans) * a_normal);
     v_skyOcc = a_skyOcclusion;
+    v_biome = a_biome;
     gl_Position = u_projViewTrans * worldPos;
 }
 """
@@ -270,6 +292,7 @@ void main() {
 attribute vec3 a_position;
 attribute vec3 a_normal;
 attribute float a_skyOcclusion;
+attribute vec2 a_biome;
 
 uniform mat4 u_projViewTrans;
 uniform mat4 u_worldTrans;
@@ -277,12 +300,14 @@ uniform mat4 u_worldTrans;
 varying vec3 v_worldPos;
 varying vec3 v_worldNormal;
 varying float v_skyOcc;
+varying vec2 v_biome;
 
 void main() {
     vec4 worldPos = u_worldTrans * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_worldNormal = normalize(mat3(u_worldTrans) * a_normal);
     v_skyOcc = a_skyOcclusion;
+    v_biome = a_biome;
     gl_Position = u_projViewTrans * worldPos;
 }
 """
@@ -302,6 +327,7 @@ precision mediump float;
 in highp vec3 v_worldPos;
 in mediump vec3 v_worldNormal;
 in mediump float v_skyOcc;
+in mediump vec2 v_biome;
 out mediump vec4 fragColor;
 """
 
@@ -320,6 +346,7 @@ precision mediump float;
 varying HP vec3 v_worldPos;
 varying mediump vec3 v_worldNormal;
 varying mediump float v_skyOcc;
+varying mediump vec2 v_biome;
 """
 
     // Texture-read budget per fragment: at most 4 reads. Flat ground costs 2, and beyond ~75 m the
@@ -335,6 +362,10 @@ uniform sampler2D u_dirtColor;
 uniform sampler2D u_dirtNormal;
 uniform sampler2D u_rockColor;
 uniform sampler2D u_rockNormal;
+uniform sampler2D u_forestColor;
+uniform sampler2D u_forestNormal;
+uniform sampler2D u_gravelColor;
+uniform sampler2D u_gravelNormal;
 
 uniform mediump float u_uvScale;
 uniform mediump float u_normalStrength;
@@ -363,7 +394,7 @@ const HP float NORMAL_FADE_END = 75.0;
 const mediump float CAVE_AMBIENT_MIN = 0.05;
 // Natural, desaturated palette (moss, wet earth, grey rock, pale grey-beige sand). The textures are
 // graded in the shader (pure ALU) so no art assets change.
-const mediump vec3 SAND_COLOR = vec3(0.60, 0.565, 0.50);
+const mediump vec3 SAND_COLOR = vec3(0.60, 0.58, 0.53);
 const mediump vec3 LUMA = vec3(0.30, 0.59, 0.11);
 
 struct Proj {
@@ -403,8 +434,17 @@ mediump vec3 desat(mediump vec3 c, mediump float amount) {
     return mix(vec3(dot(c, LUMA)), c, amount);
 }
 mediump vec3 gradeGrass(mediump vec3 c) { return desat(c, 0.60) * vec3(0.76, 0.87, 0.68); }
-mediump vec3 gradeDirt(mediump vec3 c) { return desat(c, 0.50) * vec3(0.68, 0.64, 0.60); }
+mediump vec3 gradeDirt(mediump vec3 c) { return desat(c, 0.36) * vec3(0.66, 0.62, 0.58); }
 mediump vec3 gradeRock(mediump vec3 c) { return desat(c, 0.50) * vec3(0.86, 0.87, 0.88); }
+// The forest floor texture is a saturated orange: pushed to dark, damp brown earth
+mediump vec3 gradeForest(mediump vec3 c) { return desat(c, 0.30) * vec3(0.66, 0.60, 0.55); }
+mediump vec3 gradeGravel(mediump vec3 c) { return desat(c, 0.55) * vec3(1.28, 1.22, 1.16); }
+
+const int M_GRASS = 0;
+const int M_DIRT = 1;
+const int M_ROCK = 2;
+const int M_FOREST = 3;
+const int M_GRAVEL = 4;
 
 // Tri-planar colour of one material; weights tw sum to 1 and fade smoothly to 0.
 // Each active axis costs exactly one texture read.
@@ -433,6 +473,41 @@ mediump vec3 perturbNormal(
     } else {
         return normalize(vec3(tn.x + geomN.x, tn.y + geomN.y, geomN.z * tn.z));
     }
+}
+
+// Normal strength per material: the forest floor and the shingle get extra relief for depth
+mediump float normalScale(int id) {
+    if (id == M_FOREST) return 1.45;
+    if (id == M_GRAVEL) return 1.25;
+    return 1.0;
+}
+
+// Tri-planar graded colour of material [id] (up to 3 reads, one per active axis)
+mediump vec3 matTri(int id, Proj px, Proj py, Proj pz, mediump vec3 tw) {
+    if (id == M_GRASS) return gradeGrass(sampleColor(u_grassColor, px, py, pz, tw));
+    if (id == M_DIRT) return gradeDirt(sampleColor(u_dirtColor, px, py, pz, tw));
+    if (id == M_ROCK) return gradeRock(sampleColor(u_rockColor, px, py, pz, tw));
+    if (id == M_FOREST) return gradeForest(sampleColor(u_forestColor, px, py, pz, tw));
+    return gradeGravel(sampleColor(u_gravelColor, px, py, pz, tw));
+}
+
+// Graded colour of material [id] from the dominant axis only (1 read)
+mediump vec3 matDom(int id, Proj d) {
+    if (id == M_GRASS) return gradeGrass(SAMPLE(u_grassColor, d.uv, d.dx, d.dy).rgb);
+    if (id == M_DIRT) return gradeDirt(SAMPLE(u_dirtColor, d.uv, d.dx, d.dy).rgb);
+    if (id == M_ROCK) return gradeRock(SAMPLE(u_rockColor, d.uv, d.dx, d.dy).rgb);
+    if (id == M_FOREST) return gradeForest(SAMPLE(u_forestColor, d.uv, d.dx, d.dy).rgb);
+    return gradeGravel(SAMPLE(u_gravelColor, d.uv, d.dx, d.dy).rgb);
+}
+
+// Perturbed normal of material [id] (1 read)
+mediump vec3 matNormal(int id, Proj d, int axis, mediump vec3 geomN, mediump float amount) {
+    mediump float a = amount * normalScale(id);
+    if (id == M_GRASS) return perturbNormal(u_grassNormal, d, axis, geomN, a);
+    if (id == M_DIRT) return perturbNormal(u_dirtNormal, d, axis, geomN, a);
+    if (id == M_ROCK) return perturbNormal(u_rockNormal, d, axis, geomN, a);
+    if (id == M_FOREST) return perturbNormal(u_forestNormal, d, axis, geomN, a);
+    return perturbNormal(u_gravelNormal, d, axis, geomN, a);
 }
 
 void main() {
@@ -506,51 +581,65 @@ void main() {
     bool alpine = alt > 23.0 || steepRock > 0.3;
     bool bareRock = isRock || (g < 0.02 && alpine);
 
+    // Ground cover baked per vertex from the terrain shape (IslandTerrain.biomeAt): forest floor where the
+    // trees are, gravel on shingle shores, outcrops and gully beds. Noise ragged-edges both.
+    mediump float forestShare = smoothstep(0.35, 0.65, v_biome.x + (n2 - 0.5) * 0.3 + (nLow - 0.5) * 0.35);
+    int lowId = M_DIRT;
+    if (alpine) {
+        lowId = M_ROCK;
+    } else if (v_biome.y + (n - 0.5) * 0.5 + (nLow - 0.5) * 0.3 > 0.5) {
+        lowId = M_GRAVEL;
+    }
+    int upId = forestShare > 0.5 ? M_FOREST : M_GRASS;
+
     mediump float normalAmount = 1.0 - smoothstep(NORMAL_FADE_START, NORMAL_FADE_END, camDist);
     bool useNormal = normalAmount > 0.0;
 
-    // Reads: bare rock or pure soil = up to 3 colour (one per active axis) + 1 normal. Only inside
-    // the grass transition band (sand/rock <-> grass) both materials are needed, and then only the
-    // dominant axis is sampled (2 colour + 2 normal = 4), so the budget of 4 holds everywhere.
+    // Material pick. Reads: a pure material = up to 3 colour (one per active axis) + 1 normal. Only inside
+    // a transition band (low <-> grass, grass <-> forest floor) are two materials needed, and then only the
+    // dominant axis is sampled (2 colour + 2 normal), so the budget of 4 reads holds everywhere.
+    int idA = M_ROCK;
+    int idB = M_GRASS;
+    mediump float bandT = 0.0;
+    bool band = false;
+    if (bareRock) {
+        idA = M_ROCK;
+    } else if (g < 0.02) {
+        idA = lowId;
+    } else if (g > 0.98) {
+        if (forestShare < 0.02) {
+            idA = M_GRASS;
+        } else if (forestShare > 0.98) {
+            idA = M_FOREST;
+        } else {
+            idA = M_GRASS; idB = M_FOREST; bandT = forestShare; band = true;
+        }
+    } else {
+        idA = lowId; idB = upId; bandT = g; band = true;
+    }
+
     mediump vec3 albedo;
     mediump vec3 N = geomN;
-    if (bareRock) {
-        albedo = gradeRock(sampleColor(u_rockColor, projX, projY, projZ, tw));
-        if (useNormal) N = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
-    } else if (g < 0.02) {
-        albedo = gradeDirt(sampleColor(u_dirtColor, projX, projY, projZ, tw));
-        if (useNormal) N = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
-    } else if (g > 0.98) {
-        albedo = gradeGrass(sampleColor(u_grassColor, projX, projY, projZ, tw));
-        if (useNormal) N = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
+    if (!band) {
+        albedo = matTri(idA, projX, projY, projZ, tw);
+        if (useNormal) N = matNormal(idA, dom, domAxis, geomN, normalAmount);
     } else {
-        mediump vec3 grassCol = gradeGrass(SAMPLE(u_grassColor, dom.uv, dom.dx, dom.dy).rgb);
-        mediump vec3 lowCol;
-        if (alpine) {
-            lowCol = gradeRock(SAMPLE(u_rockColor, dom.uv, dom.dx, dom.dy).rgb);
-        } else {
-            lowCol = gradeDirt(SAMPLE(u_dirtColor, dom.uv, dom.dx, dom.dy).rgb);
-        }
-        albedo = mix(lowCol, grassCol, g);
+        albedo = mix(matDom(idA, dom), matDom(idB, dom), bandT);
         if (useNormal) {
-            mediump vec3 nLowN;
-            if (alpine) {
-                nLowN = perturbNormal(u_rockNormal, dom, domAxis, geomN, normalAmount);
-            } else {
-                nLowN = perturbNormal(u_dirtNormal, dom, domAxis, geomN, normalAmount);
-            }
-            mediump vec3 nGrass = perturbNormal(u_grassNormal, dom, domAxis, geomN, normalAmount);
-            N = normalize(mix(nLowN, nGrass, g));
+            N = normalize(mix(
+                matNormal(idA, dom, domAxis, geomN, normalAmount),
+                matNormal(idB, dom, domAxis, geomN, normalAmount),
+                bandT));
         }
     }
 
     mediump float luma = dot(albedo, LUMA);
-    if (!bareRock) {
+    if (!bareRock && lowId == M_DIRT) {
         // Beach sand: the graded dirt pushed towards pale grey-beige sand on gentle ground between just
         // below the waterline and the top of the beach (keeps its detail through the luminance)
         mediump float sandAmount = (1.0 - g) * smoothstep(-2.4, -0.3, v_worldPos.y) *
             (1.0 - smoothstep(2.4, 4.4, ground)) * smoothstep(0.45, 0.70, geomN.y);
-        albedo = mix(albedo, SAND_COLOR * (0.60 + 0.90 * luma), sandAmount * 0.85);
+        albedo = mix(albedo, SAND_COLOR * (0.62 + 0.90 * luma), sandAmount * 0.95);
     }
     // Mountain rock cools towards grey with altitude (the rock texture itself is brownish)
     albedo = mix(albedo, vec3(luma) * vec3(0.94, 0.97, 1.04), 0.5 * altRock);

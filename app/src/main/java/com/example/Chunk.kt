@@ -45,6 +45,9 @@ class Chunk(
    */
   var maxSurfaceY: Float = Float.NEGATIVE_INFINITY
 
+  /** Lowest terrain surface over the same columns; below it the ground is solid (unless dug). */
+  var minSurfaceY: Float = Float.POSITIVE_INFINITY
+
   private class MeshSlice(
     val mesh: Mesh,
     val renderable: Renderable,
@@ -146,7 +149,7 @@ class Chunk(
     const val SIZE_Z = 16
     const val GRID_Y = SIZE_Y + 1
 
-    const val VERTEX_FLOATS = 7 // position (3) + normal (3) + sky exposure (1)
+    const val VERTEX_FLOATS = 9 // position (3) + normal (3) + sky exposure (1) + biome forest/gravel (2)
 
     // Slice limits: vertices are addressed by 16-bit indices, so a slice never exceeds this many.
     // A cell emits at most 12 vertices / 15 indices; the mesher flushes a slice before it could overflow.
@@ -157,12 +160,15 @@ class Chunk(
     private const val BOUNDS_PADDING = 0.05f
 
     const val SKY_EXPOSURE_ALIAS = "a_skyOcclusion"
+    const val BIOME_ALIAS = "a_biome"
 
     private val ATTRIBUTES = VertexAttributes(
       VertexAttribute.Position(),
       VertexAttribute.Normal(),
       // 1.0 = open sky, 0.0 = buried; read by TerrainShader to darken caves (see SkyExposure)
-      VertexAttribute(VertexAttributes.Usage.Generic, 1, SKY_EXPOSURE_ALIAS)
+      VertexAttribute(VertexAttributes.Usage.Generic, 1, SKY_EXPOSURE_ALIAS),
+      // x = forest weight, y = gravel weight (see IslandTerrain.biomeAt); read by TerrainShader to pick the ground
+      VertexAttribute(VertexAttributes.Usage.Generic, 2, BIOME_ALIAS)
     )
 
     fun index(lx: Int, gy: Int, lz: Int): Int = (gy * SIZE_Z + lz) * SIZE_X + lx

@@ -70,7 +70,8 @@ class ChunkManager(
   val centerX: Float = (minX + maxX) * 0.5f
   val centerZ: Float = (minZ + maxZ) * 0.5f
 
-  private val terrain = IslandTerrain(seed, centerX, centerZ, islandRadius, seaLevel)
+  /** The analytic island: heights and ground-cover weights, also used by the world populator. */
+  val terrain = IslandTerrain(seed, centerX, centerZ, islandRadius, seaLevel)
 
   private val terrainMaterial = Material(
     ColorAttribute.createDiffuse(Color(0.32f, 0.45f, 0.24f, 1f)),
@@ -123,6 +124,15 @@ class ChunkManager(
   // columns that belong to the neighbours: index = (lz * (SIZE_X + 1) + lx) * GRID_Y + gy
   private val skyExposure = FloatArray((Chunk.SIZE_X + 1) * (Chunk.SIZE_Z + 1) * Chunk.GRID_Y)
   private val cornerSky = FloatArray(8)
+
+  // Ground-cover weights (forest, gravel) per grid column of the chunk being meshed, same layout
+  // as the sky exposure columns but without the vertical axis: index = lz * (SIZE_X + 1) + lx
+  private val biomeForest = FloatArray((Chunk.SIZE_X + 1) * (Chunk.SIZE_Z + 1))
+  private val biomeGravel = FloatArray((Chunk.SIZE_X + 1) * (Chunk.SIZE_Z + 1))
+  private val biomeScratch = FloatArray(4)
+  private val cornerForest = FloatArray(8)
+  private val cornerGravel = FloatArray(8)
+  private val cornerColumn = IntArray(8)
 
   private val scratchVertexBuffer = FloatArray(Chunk.MAX_SLICE_VERTICES * Chunk.VERTEX_FLOATS)
   private val scratchIndexBuffer = ShortArray(Chunk.MAX_SLICE_INDICES)
@@ -294,12 +304,14 @@ class ChunkManager(
     val baseGx = chunk.cx * Chunk.SIZE_X
     val baseGz = chunk.cz * Chunk.SIZE_Z
     var maxSurface = -Float.MAX_VALUE
+    var minSurface = Float.MAX_VALUE
     for (lz in 0..Chunk.SIZE_Z) {
       val wz = minZ + (baseGz + lz) * voxelSize
       for (lx in 0..Chunk.SIZE_X) {
         val wx = minX + (baseGx + lx) * voxelSize
         val surfaceHeight = terrain.heightAt(wx, wz)
         if (surfaceHeight > maxSurface) maxSurface = surfaceHeight
+        if (surfaceHeight < minSurface) minSurface = surfaceHeight
         // The +X / +Z border columns belong to the neighbours: sampled only for the height bound
         if (lx == Chunk.SIZE_X || lz == Chunk.SIZE_Z) continue
         for (gy in 0 until Chunk.GRID_Y) {
@@ -310,6 +322,7 @@ class ChunkManager(
       }
     }
     chunk.maxSurfaceY = maxSurface
+    chunk.minSurfaceY = minSurface
   }
 
   /** Analytic (unedited) terrain density at a grid point, independent of any loaded chunk. */
@@ -379,6 +392,25 @@ class ChunkManager(
     }
   }
 
+  private fun computeBiome(baseGx: Int, baseGz: Int) {
+    for (lz in 0..Chunk.SIZE_Z) {
+      val wz = minZ + (baseGz + lz) * voxelSize
+      for (lx in 0..Chunk.SIZE_X) {
+        terrain.biomeAt(minX + (baseGx + lx) * voxelSize, wz, biomeScratch)
+        val col = lz * (Chunk.SIZE_X + 1) + lx
+        biomeForest[col] = biomeScratch[0]
+        biomeGravel[col] = biomeScratch[1]
+      }
+    }
+  }
+
+  private fun neighbourhoodEdited(chunk: Chunk): Boolean {
+    for (dz in -1..1) for (dx in -1..1) {
+      if (deltas.hasEdits(Chunk.key(chunk.cx + dx, chunk.cz + dz))) return true
+    }
+    return false
+  }
+
   private fun skyAt(lx: Int, gy: Int, lz: Int): Float =
     skyExposure[(lz * (Chunk.SIZE_X + 1) + lx) * Chunk.GRID_Y + gy]
 
@@ -415,6 +447,7 @@ class ChunkManager(
     // the cell layers above it are skipped: on the 64-level chunk a beach chunk meshes ~20 layers
     val topCell = (floor((chunk.maxSurfaceY - minY) / voxelSize).toInt() + 1).coerceIn(0, cellsY - 1)
     computeSkyExposure(baseGx, baseGz, topCell + 1)
+    computeBiome(baseGx, baseGz)
 
     var vertCount = 0
     var idxCount = 0
@@ -427,7 +460,14 @@ class ChunkManager(
     var boundMaxY = -Float.MAX_VALUE
     var boundMaxZ = -Float.MAX_VALUE
 
-    for (gy in 0..topCell) {
+    // ...and below the lowest surface everything is solid, so those layers are skipped too, unless this
+    // chunk or any neighbour (whose edits its border cells read) was ever dug
+    var lowCell = 0
+    if (!neighbourhoodEdited(chunk)) {
+      lowCell = (floor((chunk.minSurfaceY - minY) / voxelSize).toInt() - 2).coerceIn(0, topCell)
+    }
+
+    for (gy in lowCell..topCell) {
       val wy0 = minY + gy * voxelSize
       val wy1 = wy0 + voxelSize
 
@@ -493,6 +533,20 @@ class ChunkManager(
           cornerSky[6] = skyAt(lx + 1, gy + 1, lz + 1)
           cornerSky[7] = skyAt(lx, gy + 1, lz + 1)
 
+          val stride = Chunk.SIZE_X + 1
+          cornerColumn[0] = lz * stride + lx
+          cornerColumn[1] = lz * stride + lx + 1
+          cornerColumn[2] = (lz + 1) * stride + lx + 1
+          cornerColumn[3] = (lz + 1) * stride + lx
+          cornerColumn[4] = cornerColumn[0]
+          cornerColumn[5] = cornerColumn[1]
+          cornerColumn[6] = cornerColumn[2]
+          cornerColumn[7] = cornerColumn[3]
+          for (c in 0 until 8) {
+            cornerForest[c] = biomeForest[cornerColumn[c]]
+            cornerGravel[c] = biomeGravel[cornerColumn[c]]
+          }
+
           computeGridGradientNormal(gx, gy, gz, 0)
           computeGridGradientNormal(gx + 1, gy, gz, 1)
           computeGridGradientNormal(gx + 1, gy, gz + 1, 2)
@@ -540,6 +594,8 @@ class ChunkManager(
               scratchVertexBuffer[base + 4] = ny
               scratchVertexBuffer[base + 5] = nz
               scratchVertexBuffer[base + 6] = cornerSky[c0] + t * (cornerSky[c1] - cornerSky[c0])
+              scratchVertexBuffer[base + 7] = cornerForest[c0] + t * (cornerForest[c1] - cornerForest[c0])
+              scratchVertexBuffer[base + 8] = cornerGravel[c0] + t * (cornerGravel[c1] - cornerGravel[c0])
 
               if (px < boundMinX) boundMinX = px
               if (py < boundMinY) boundMinY = py
@@ -732,37 +788,50 @@ class ChunkManager(
   }
 
   /**
-   * Picks a spawn on the lowlands as close to the island centre as possible: walks outward in rings
-   * until the terrain is above [seaLevel] but below the mountains, then lets [findSpawnY] settle the height.
+   * Picks a spawn on firm, open ground as close to the island centre as possible: walks outward in
+   * rings until it finds a flat, dry spot above the waterline and below the mountains that is not
+   * forest, rock outcrop, gravel or gully (the world populator keeps a [SPAWN_CLEARING_RADIUS] m
+   * clearing around it), then lets [findSpawnY] settle the height. If the whole island is too
+   * rugged for that, the second pass only asks for dry, gentle ground.
    * Writes the result (x, feet-clearance y, z) into [out].
    */
   fun findDrySpawn(out: Vector3): Vector3 {
-    var ring = 0f
-    while (ring <= islandRadius) {
-      val samples = if (ring == 0f) 1 else (ring * 0.8f).toInt().coerceAtLeast(8)
-      for (i in 0 until samples) {
-        val angle = (2.0 * PI * i / samples).toFloat()
-        val x = centerX + cos(angle) * ring
-        val z = centerZ + sin(angle) * ring
-        if (isDryLand(x, z)) {
-          return out.set(x, findSpawnY(x, z), z)
+    for (strict in booleanArrayOf(true, false)) {
+      var ring = 0f
+      while (ring <= islandRadius) {
+        val samples = if (ring == 0f) 1 else (ring * 0.5f).toInt().coerceAtLeast(8)
+        for (i in 0 until samples) {
+          val angle = (2.0 * PI * i / samples).toFloat()
+          val x = centerX + cos(angle) * ring
+          val z = centerZ + sin(angle) * ring
+          if (isSpawnGround(x, z, strict)) {
+            return out.set(x, findSpawnY(x, z), z)
+          }
         }
+        ring += SPAWN_SEARCH_STEP
       }
-      ring += SPAWN_SEARCH_STEP
     }
     return out.set(centerX, findSpawnY(centerX, centerZ), centerZ)
   }
 
-  private fun isDryLand(x: Float, z: Float): Boolean {
+  private fun isSpawnGround(x: Float, z: Float, strict: Boolean): Boolean {
     val h = terrain.heightAt(x, z)
     // Comfortably above the water, but on the lowlands: not up on the mountains
     if (h < seaLevel + SPAWN_MIN_HEIGHT_ABOVE_SEA || h > seaLevel + SPAWN_MAX_HEIGHT_ABOVE_SEA) return false
-    // Reject steep spots so the player does not start on a cliff face
-    val d = SPAWN_SLOPE_PROBE
-    return abs(terrain.heightAt(x + d, z) - h) < SPAWN_MAX_SLOPE_DELTA &&
-      abs(terrain.heightAt(x - d, z) - h) < SPAWN_MAX_SLOPE_DELTA &&
-      abs(terrain.heightAt(x, z + d) - h) < SPAWN_MAX_SLOPE_DELTA &&
-      abs(terrain.heightAt(x, z - d) - h) < SPAWN_MAX_SLOPE_DELTA
+    // Flat enough all around the clearing, so the player does not start on a slope or a ledge
+    val maxDelta = if (strict) SPAWN_MAX_SLOPE_DELTA else SPAWN_MAX_SLOPE_DELTA * 2f
+    for (r in floatArrayOf(SPAWN_SLOPE_PROBE, SPAWN_CLEARING_RADIUS)) {
+      val k = r / SPAWN_SLOPE_PROBE
+      if (abs(terrain.heightAt(x + r, z) - h) > maxDelta * k ||
+        abs(terrain.heightAt(x - r, z) - h) > maxDelta * k ||
+        abs(terrain.heightAt(x, z + r) - h) > maxDelta * k ||
+        abs(terrain.heightAt(x, z - r) - h) > maxDelta * k
+      ) return false
+    }
+    if (!strict) return true
+    // Open ground: no forest, no gravel/rock outcrop, not in a gully
+    terrain.biomeAt(x, z, biomeScratch)
+    return biomeScratch[0] < 0.08f && biomeScratch[1] < 0.25f && terrain.rockZoneAt(x, z) < 0.05f
   }
 
   /**
@@ -936,10 +1005,13 @@ class ChunkManager(
     private const val NO_KEY = Long.MIN_VALUE
 
     private const val SPAWN_SEARCH_STEP = 4f
+
+    /** Radius of the clearing kept free of trees and rocks around the spawn point. */
+    const val SPAWN_CLEARING_RADIUS = 7f
     private const val SPAWN_MIN_HEIGHT_ABOVE_SEA = 2.0f
-    private const val SPAWN_MAX_HEIGHT_ABOVE_SEA = 7.0f
-    private const val SPAWN_SLOPE_PROBE = 1.5f
-    private const val SPAWN_MAX_SLOPE_DELTA = 1.6f
+    private const val SPAWN_MAX_HEIGHT_ABOVE_SEA = 9.0f
+    private const val SPAWN_SLOPE_PROBE = 2.5f
+    private const val SPAWN_MAX_SLOPE_DELTA = 0.5f
 
     private val EDGE_TABLE = VoxelVolumeMesh.EDGE_TABLE
     private val TRI_TABLE = VoxelVolumeMesh.TRI_TABLE
