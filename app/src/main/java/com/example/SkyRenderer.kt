@@ -41,6 +41,9 @@ class SkyRenderer : Disposable {
   private val moonProgram = compile(BODY_VERTEX, MOON_FRAGMENT)
   private val starProgram = compile(STAR_VERTEX, STAR_FRAGMENT)
 
+  /** Live visual calibration: the sun, moon and stars share the world's exposure, saturation and warmth. */
+  var visual: VisualSettings = VisualSettings()
+
   private val quad: Mesh
   private val stars: Mesh
 
@@ -93,6 +96,7 @@ class SkyRenderer : Disposable {
 
     val program = sunProgram
     program.bind()
+    bindGrade(program)
     bindBody(program, camera, dayNight.sunDirection, radius, SUN_EXTENT, SUN_DISC / SUN_EXTENT)
     program.setUniformf("u_color", sunColor.r, sunColor.g, sunColor.b)
     program.setUniformf("u_strength", dayNight.sunVisibility)
@@ -104,12 +108,20 @@ class SkyRenderer : Disposable {
   private fun drawMoon(camera: Camera, dayNight: DayNightCycle, radius: Float) {
     val program = moonProgram
     program.bind()
+    bindGrade(program)
     bindBody(program, camera, dayNight.moonDirection, radius, MOON_EXTENT, MOON_DISC / MOON_EXTENT)
     program.setUniformf("u_color", moonColor.r, moonColor.g, moonColor.b)
     program.setUniformf("u_haloColor", moonHalo.r, moonHalo.g, moonHalo.b)
     program.setUniformf("u_strength", dayNight.moonVisibility)
     Gdx.gl.glBlendFunc(GL20.GL_ONE, GL20.GL_ONE_MINUS_SRC_ALPHA)
     quad.render(program, GL20.GL_TRIANGLES)
+  }
+
+  private fun bindGrade(program: ShaderProgram) {
+    program.setUniformf("u_brightness", visual.brightness)
+    program.setUniformf("u_contrast", visual.contrast)
+    program.setUniformf("u_saturation", visual.saturation)
+    program.setUniformf("u_warmth", visual.tintR, visual.tintG, visual.tintB)
   }
 
   private fun bindBody(
@@ -133,6 +145,7 @@ class SkyRenderer : Disposable {
 
     val program = starProgram
     program.bind()
+    bindGrade(program)
     program.setUniformMatrix("u_projView", camera.combined)
     program.setUniformMatrix("u_rotation", starRotation)
     program.setUniformf("u_camPos", camera.position)
@@ -281,6 +294,7 @@ void main() {
 
     private const val SUN_FRAGMENT = """#version 100
 precision mediump float;
+""" + VisualGrade.GLSL + """
 
 uniform vec3 u_color;
 uniform float u_disc;      // disc radius as a fraction of the quad half-size
@@ -298,12 +312,13 @@ void main() {
     float glow = edge * edge * 0.62 / (1.0 + rho * rho * 0.30);
     float horizon = smoothstep(-0.012, 0.03, v_h) * u_strength;
     // Premultiplied alpha: alpha only where the disc is, the halo just adds light
-    gl_FragColor = vec4(u_color * (core * 1.4 + glow) * horizon, core * horizon);
+    gl_FragColor = vec4(visualGradeLight(u_color * (core * 1.4 + glow) * horizon), core * horizon);
 }
 """
 
     private const val MOON_FRAGMENT = """#version 100
 precision mediump float;
+""" + VisualGrade.GLSL + """
 
 uniform vec3 u_color;
 uniform vec3 u_haloColor;
@@ -334,7 +349,7 @@ void main() {
     float edge = 1.0 - smoothstep(0.25, 1.0, r);
     float glow = edge * edge * 0.30 / (1.0 + rho * rho * 0.45);
     float horizon = smoothstep(-0.012, 0.03, v_h) * u_strength;
-    gl_FragColor = vec4((albedo * cover + u_haloColor * glow) * horizon, cover * horizon);
+    gl_FragColor = vec4(visualGradeLight((albedo * cover + u_haloColor * glow) * horizon), cover * horizon);
 }
 """
 
@@ -375,6 +390,7 @@ void main() {
 
     private const val STAR_FRAGMENT = """#version 100
 precision mediump float;
+""" + VisualGrade.GLSL + """
 
 varying vec2 v_corner;
 varying vec3 v_color;
@@ -382,7 +398,7 @@ varying vec3 v_color;
 void main() {
     float s = 1.0 - clamp(length(v_corner), 0.0, 1.0);
     s = s * s * (3.0 - 2.0 * s);
-    gl_FragColor = vec4(v_color * s, 1.0);
+    gl_FragColor = vec4(visualGradeLight(v_color * s), 1.0);
 }
 """
   }

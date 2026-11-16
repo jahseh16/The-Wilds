@@ -19,6 +19,9 @@ import com.badlogic.gdx.scenes.scene2d.utils.TextureRegionDrawable
 import com.badlogic.gdx.utils.viewport.ExtendViewport
 
 class HudStage(
+  private val visual: VisualSettings,
+  private val onVisualChanged: () -> Unit,
+  private val onVisualSettled: () -> Unit,
   private val onLookDelta: (deltaX: Float, deltaY: Float) -> Unit
 ) : Stage(ExtendViewport(VIRTUAL_WIDTH, VIRTUAL_HEIGHT)) {
 
@@ -104,6 +107,20 @@ class HudStage(
     ringColor = Color(0.95f, 0.98f, 1.0f, 0.95f)
   )
 
+  private val gearUpTexture: Texture = createGearTexture(
+    size = 112,
+    fillColor = Color(0.06f, 0.09f, 0.13f, 0.50f),
+    ringColor = Color(0.80f, 0.86f, 0.95f, 0.65f),
+    glyphColor = Color(0.88f, 0.92f, 0.97f, 0.92f)
+  )
+
+  private val gearDownTexture: Texture = createGearTexture(
+    size = 112,
+    fillColor = Color(0.30f, 0.38f, 0.52f, 0.80f),
+    ringColor = Color(0.95f, 0.98f, 1.0f, 0.95f),
+    glyphColor = Color.WHITE
+  )
+
   private val buttonFont: BitmapFont = BitmapFont().apply {
     data.setScale(1.32f)
   }
@@ -125,6 +142,8 @@ class HudStage(
   private val lightButton: TextButton
   private val lightButtonStyle: TextButton.TextButtonStyle
   private val phaseButton: TextButton
+  private val gearButton: TextButton
+  private val visualPanel: VisualPanel
   private var shownPhaseLabel: String = ""
 
   @Volatile
@@ -360,7 +379,59 @@ class HudStage(
       add(phaseButton).size(PHASE_BUTTON_WIDTH, PHASE_BUTTON_HEIGHT).top()
     }
     addActor(topTable)
+
+    // Visual calibration: a discreet gear in the top-right corner opens the live panel (left of the
+    // action buttons, clear of the joystick), which lets the world show through while it is open
+    visualPanel = VisualPanel(visual, onVisualChanged, onVisualSettled)
+    gearButton = TextButton(
+      "",
+      TextButton.TextButtonStyle(
+        TextureRegionDrawable(TextureRegion(gearUpTexture)),
+        TextureRegionDrawable(TextureRegion(gearDownTexture)),
+        null,
+        phaseFont
+      )
+    ).apply {
+      addListener(object : InputListener() {
+        override fun touchDown(
+          event: InputEvent?,
+          x: Float,
+          y: Float,
+          pointer: Int,
+          button: Int
+        ): Boolean {
+          visualPanel.toggle()
+          return true
+        }
+      })
+    }
+    val gearTable = Table().apply {
+      setFillParent(true)
+      top().right()
+      pad(14f)
+      add(gearButton).size(GEAR_BUTTON_SIZE, GEAR_BUTTON_SIZE)
+    }
+    addActor(gearTable)
+
+    val panelTable = Table().apply {
+      setFillParent(true)
+      top().left()
+      padTop(PANEL_TOP_MARGIN)
+      padLeft(PANEL_LEFT_MARGIN)
+      add(visualPanel)
+    }
+    addActor(panelTable)
   }
+
+  val isVisualPanelOpen: Boolean
+    get() = visualPanel.isOpen
+
+  /** True while a finger drags a calibration slider (the camera look gesture is blocked by the panel anyway). */
+  val isDraggingVisualSlider: Boolean
+    get() = visualPanel.isDraggingSlider
+
+  /** Refreshes the sliders after the settings were loaded from the preferences. */
+  fun syncVisualPanel() = visualPanel.syncFromSettings()
 
   /** Shows the current day phase on the top button (cheap to call every frame). */
   fun setPhaseLabel(label: String) {
@@ -414,9 +485,54 @@ class HudStage(
     lightOnTexture.dispose()
     phaseUpTexture.dispose()
     phaseDownTexture.dispose()
+    gearUpTexture.dispose()
+    gearDownTexture.dispose()
+    visualPanel.dispose()
     buttonFont.dispose()
     phaseFont.dispose()
     super.dispose()
+  }
+
+  /** Round translucent button with a cog glyph (8 teeth around a ring, hollow centre). */
+  private fun createGearTexture(size: Int, fillColor: Color, ringColor: Color, glyphColor: Color): Texture {
+    val pixmap = Pixmap(size, size, Pixmap.Format.RGBA8888)
+    val c = size / 2
+    val radius = c - 2
+
+    pixmap.setColor(fillColor)
+    pixmap.fillCircle(c, c, radius)
+    pixmap.setColor(ringColor)
+    for (offset in 0 until 3) pixmap.drawCircle(c, c, radius - offset)
+
+    pixmap.setColor(glyphColor)
+    val inner = size * 0.215f
+    val outer = size * 0.315f
+    val halfWidth = Math.toRadians(11.0)
+    for (i in 0 until 8) {
+      val a = Math.toRadians(i * 45.0)
+      val a0 = a - halfWidth
+      val a1 = a + halfWidth
+      val x0 = c + (inner * Math.cos(a0)).toFloat()
+      val y0 = c + (inner * Math.sin(a0)).toFloat()
+      val x1 = c + (inner * Math.cos(a1)).toFloat()
+      val y1 = c + (inner * Math.sin(a1)).toFloat()
+      val x2 = c + (outer * Math.cos(a1)).toFloat()
+      val y2 = c + (outer * Math.sin(a1)).toFloat()
+      val x3 = c + (outer * Math.cos(a0)).toFloat()
+      val y3 = c + (outer * Math.sin(a0)).toFloat()
+      pixmap.fillTriangle(x0.toInt(), y0.toInt(), x1.toInt(), y1.toInt(), x2.toInt(), y2.toInt())
+      pixmap.fillTriangle(x0.toInt(), y0.toInt(), x2.toInt(), y2.toInt(), x3.toInt(), y3.toInt())
+    }
+    pixmap.fillCircle(c, c, (size * 0.245f).toInt())
+    // Hollow centre: replace (not blend) with the button's own fill
+    pixmap.setBlending(Pixmap.Blending.None)
+    pixmap.setColor(fillColor)
+    pixmap.fillCircle(c, c, (size * 0.11f).toInt())
+
+    return Texture(pixmap).apply {
+      setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+      pixmap.dispose()
+    }
   }
 
   /** Rounded "pill" button background: a ring-coloured pill with a translucent pill inset inside it. */
@@ -494,5 +610,9 @@ class HudStage(
     const val LIGHT_BUTTON_SIZE = 100f
     const val PHASE_BUTTON_WIDTH = 190f
     const val PHASE_BUTTON_HEIGHT = 46f
+    const val GEAR_BUTTON_SIZE = 56f
+    // The panel sits between the joystick (left) and the action buttons (right) on a 16:9 screen
+    const val PANEL_TOP_MARGIN = 72f
+    const val PANEL_LEFT_MARGIN = 268f
   }
 }

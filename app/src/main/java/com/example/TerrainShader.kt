@@ -65,6 +65,12 @@ class TerrainShader(
 
   private val tmpDir = Vector3()
 
+  private lateinit var gradeLocs: VisualGrade.Locations
+  private var uTerrainContrastLoc = -1
+
+  /** Live visual calibration (grade, light multipliers, ground contrast / relief, flashlight). */
+  var visual: VisualSettings = VisualSettings()
+
   /**
    * Exponential-squared fog density in 1/metre (0 = no fog). The fog COLOUR comes from the
    * Environment's [ColorAttribute.Fog]; the density is set by the caller each frame because libGDX
@@ -148,6 +154,9 @@ class TerrainShader(
     uSpotLightDirLoc = program.getUniformLocation("u_spotLightDir")
     uSpotLightIntensityLoc = program.getUniformLocation("u_spotLightIntensity")
     uSpotLightCutoffLoc = program.getUniformLocation("u_spotLightCutoff")
+
+    gradeLocs = VisualGrade.Locations(program, withSpot = true)
+    uTerrainContrastLoc = program.getUniformLocation("u_terrainContrast")
   }
 
   override fun compareTo(other: Shader): Int = if (other === this) 0 else -1
@@ -176,7 +185,9 @@ class TerrainShader(
     program.setUniformi(uGravelNormalLoc, context.textureBinder.bind(gravelNormal))
 
     program.setUniformf(uUvScaleLoc, TRIPLANAR_UV_SCALE)
-    program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH)
+    program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH * visual.normalStrength)
+    program.setUniformf(uTerrainContrastLoc, visual.terrainContrast)
+    gradeLocs.apply(program, visual)
     program.setUniformf(uFogDensityLoc, fogDensity)
     program.setUniformf(uFadeRangeLoc, fadeStart, fadeEnd)
   }
@@ -206,11 +217,12 @@ class TerrainShader(
 
     val ambientAttr = env.get(ColorAttribute.AmbientLight) as? ColorAttribute
     if (ambientAttr != null) {
+      val sun = visual.sunIntensity
       program.setUniformf(
         uAmbientColorLoc,
-        ambientAttr.color.r,
-        ambientAttr.color.g,
-        ambientAttr.color.b
+        ambientAttr.color.r * sun,
+        ambientAttr.color.g * sun,
+        ambientAttr.color.b * sun
       )
     } else {
       program.setUniformf(uAmbientColorLoc, 0.35f, 0.35f, 0.35f)
@@ -219,11 +231,12 @@ class TerrainShader(
     val dirAttr = env.get(DirectionalLightsAttribute.Type) as? DirectionalLightsAttribute
     val dirLight = dirAttr?.lights?.firstOrNull()
     if (dirLight != null) {
+      val sun = visual.sunIntensity
       program.setUniformf(
         uDirLightColorLoc,
-        dirLight.color.r,
-        dirLight.color.g,
-        dirLight.color.b
+        dirLight.color.r * sun,
+        dirLight.color.g * sun,
+        dirLight.color.b * sun
       )
       tmpDir.set(dirLight.direction).nor()
       program.setUniformf(uDirLightDirLoc, tmpDir)
@@ -244,7 +257,7 @@ class TerrainShader(
       program.setUniformf(uSpotLightPosLoc, spotLight.position)
       tmpDir.set(spotLight.direction).nor()
       program.setUniformf(uSpotLightDirLoc, tmpDir)
-      program.setUniformf(uSpotLightIntensityLoc, spotLight.intensity)
+      program.setUniformf(uSpotLightIntensityLoc, spotLight.intensity * visual.flashlightIntensity)
       program.setUniformf(uSpotLightCutoffLoc, spotLight.cutoffAngle)
     } else {
       program.setUniformf(uSpotLightIntensityLoc, 0f)
@@ -369,6 +382,7 @@ uniform sampler2D u_gravelNormal;
 
 uniform mediump float u_uvScale;
 uniform mediump float u_normalStrength;
+uniform mediump float u_terrainContrast;
 
 uniform mediump vec3 u_ambientColor;
 uniform mediump vec3 u_dirLightColor;
@@ -644,6 +658,8 @@ void main() {
     // Mountain rock cools towards grey with altitude (the rock texture itself is brownish)
     albedo = mix(albedo, vec3(luma) * vec3(0.94, 0.97, 1.04), 0.5 * altRock);
     albedo *= brightness;
+    // Panel: ground colour contrast around a mid albedo (1.0 = untouched)
+    albedo = max((albedo - 0.30) * u_terrainContrast + 0.30, vec3(0.0));
 
     // Ambient + Directional sun lighting, both scaled by the sky exposure
     mediump vec3 lighting = u_ambientColor * mix(CAVE_AMBIENT_MIN, 1.0, sky) * albedo;
@@ -662,7 +678,7 @@ void main() {
         mediump float cutoffCos = cos(radians(u_spotLightCutoff));
         if (cosTheta > cutoffCos) {
             mediump float cone = clamp((cosTheta - cutoffCos) / max(1.0 - cutoffCos, 0.0001), 0.0, 1.0);
-            mediump float spotFactor = pow(cone, 1.35);
+            mediump float spotFactor = spotShape(cone);
             mediump float atten = u_spotLightIntensity / (1.0 + 0.16 * distSq);
 
             mediump float spotDiff = max(dot(N, spotL), 0.0);
@@ -681,11 +697,13 @@ void main() {
     fogAmount = max(fogAmount, smoothstep(u_fadeRange.x, u_fadeRange.y, camDist));
     lighting = mix(lighting, u_fogColor, fogAmount);
 
-    fragColor = vec4(lighting, 1.0);
+    fragColor = vec4(visualGrade(lighting), 1.0);
 }
 """
 
-    private const val FRAGMENT_SHADER_ES30 = FRAGMENT_HEADER_ES30 + FRAGMENT_BODY
-    private const val FRAGMENT_SHADER_ES20 = FRAGMENT_HEADER_ES20 + FRAGMENT_BODY
+    private const val FRAGMENT_SHADER_ES30 =
+      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+    private const val FRAGMENT_SHADER_ES20 =
+      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
   }
 }

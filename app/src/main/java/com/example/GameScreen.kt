@@ -1,6 +1,7 @@
 package com.example
 
 import com.badlogic.gdx.Gdx
+import com.badlogic.gdx.Preferences
 import com.badlogic.gdx.Screen
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.GL20
@@ -45,6 +46,11 @@ class GameScreen : Screen {
   private val oceanRenderer: OceanRenderer
   private val skyRenderer = SkyRenderer()
   private val hudStage: HudStage
+
+  // Visual calibration (panel behind the HUD gear): restored from the preferences, autosaved
+  private val visual = VisualSettings()
+  private val visualPrefs: Preferences = Gdx.app.getPreferences(VisualSettings.PREFS_NAME)
+  private val clearColor = FloatArray(3)
 
   // Anti-pixelation terrain textures (diffuse + normal maps) & tri-planar shader
   private val grassColorTex: Texture
@@ -98,13 +104,15 @@ class GameScreen : Screen {
   private val streamingPos = Vector3()
 
   init {
+    visual.load { key, default -> visualPrefs.getFloat(key, default) }
+    skyRenderer.visual = visual
     chunkManager = ChunkManager()
     // Spawn on dry land as close to the island centre as possible (never in the water)
     val spawn = chunkManager.findDrySpawn(Vector3())
     // Atlases + models first: the populator must be listening before the first chunk loads
     solidAtlas = AtlasBuilder.build(Layer.SOLID)
     cutoutAtlas = AtlasBuilder.build(Layer.CUTOUT)
-    foliageShader = FoliageShader().apply { init() }
+    foliageShader = FoliageShader().apply { visual = this@GameScreen.visual; init() }
     populator = WorldPopulator(
       chunkManager,
       ScatterModels { path -> Gdx.files.internal(path).readString() },
@@ -119,7 +127,7 @@ class GameScreen : Screen {
     // Load the chunks around the spawn now so the ground is there on frame 1; the rest of the
     // streaming radius fills in one chunk per frame from render()
     chunkManager.prewarm(spawn)
-    oceanRenderer = OceanRenderer(chunkManager)
+    oceanRenderer = OceanRenderer(chunkManager).apply { visual = this@GameScreen.visual }
 
     flashlight = SpotLight().apply {
       set(
@@ -179,12 +187,23 @@ class GameScreen : Screen {
       gravelColor = gravelColorTex,
       gravelNormal = gravelNormalTex
     ).apply {
+      visual = this@GameScreen.visual
       init()
     }
 
-    hudStage = HudStage { deltaX, deltaY ->
+    hudStage = HudStage(
+      visual,
+      onVisualChanged = {},
+      onVisualSettled = ::persistVisual
+    ) { deltaX, deltaY ->
       rotateCamera(deltaX, deltaY)
     }
+  }
+
+  /** Autosave of the calibration: called when a slider drag ends, on reset / close, and when the app pauses. */
+  private fun persistVisual() {
+    visual.save { key, value -> visualPrefs.putFloat(key, value) }
+    visualPrefs.flush()
   }
 
   private fun loadTerrainTexture(internalPath: String): Texture =
@@ -234,7 +253,9 @@ class GameScreen : Screen {
     updateShovelViewmodel(dt)
 
     Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
-    Gdx.gl.glClearColor(dayNight.skyColor.r, dayNight.skyColor.g, dayNight.skyColor.b, 1f)
+    // The sky gets the same grade as the shaders apply to everything else, so the horizon still matches
+    visual.grade(dayNight.skyColor.r, dayNight.skyColor.g, dayNight.skyColor.b, clearColor)
+    Gdx.gl.glClearColor(clearColor[0], clearColor[1], clearColor[2], 1f)
     Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)
 
     // Sun, moon and stars on top of the clear colour, before any geometry (no depth writes)
@@ -647,6 +668,7 @@ class GameScreen : Screen {
   }
 
   override fun pause() {
+    persistVisual()
     soundManager.pauseAmbient()
   }
 
@@ -655,6 +677,7 @@ class GameScreen : Screen {
   }
 
   override fun hide() {
+    persistVisual()
     soundManager.pauseAmbient()
     if (Gdx.input.inputProcessor == hudStage.inputProcessor) {
       Gdx.input.inputProcessor = null
@@ -662,6 +685,7 @@ class GameScreen : Screen {
   }
 
   override fun dispose() {
+    persistVisual()
     modelBatch.dispose()
     terrainShader.dispose()
     oceanRenderer.dispose()

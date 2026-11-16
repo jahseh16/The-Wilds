@@ -61,6 +61,10 @@ class WaterShader(
   private var uSpotLightCutoffLoc = -1
 
   private val tmpDir = Vector3()
+  private lateinit var gradeLocs: VisualGrade.Locations
+
+  /** Live visual calibration (grade, sun / ambient multiplier, flashlight). */
+  var visual: VisualSettings = VisualSettings()
 
   /** Animation clock in seconds. The waves repeat every [TIME_WRAP] s, so wrap it there (seamless). */
   var time: Float = 0f
@@ -106,6 +110,7 @@ class WaterShader(
     uSpotLightDirLoc = program.getUniformLocation("u_spotLightDir")
     uSpotLightIntensityLoc = program.getUniformLocation("u_spotLightIntensity")
     uSpotLightCutoffLoc = program.getUniformLocation("u_spotLightCutoff")
+    gradeLocs = VisualGrade.Locations(program, withSpot = true)
   }
 
   override fun compareTo(other: Shader): Int = if (other === this) 0 else -1
@@ -131,6 +136,7 @@ class WaterShader(
     program.setUniformf(uFogDensityLoc, fogDensity)
     program.setUniformf(uFarDistanceLoc, farDistance)
     program.setUniformf(uSkyColorLoc, skyColor.r, skyColor.g, skyColor.b)
+    gradeLocs.apply(program, visual)
   }
 
   override fun render(renderable: Renderable) {
@@ -150,7 +156,7 @@ class WaterShader(
 
     val ambient = env?.get(ColorAttribute.AmbientLight) as? ColorAttribute
     if (ambient != null) {
-      program.setUniformf(uAmbientColorLoc, ambient.color.r, ambient.color.g, ambient.color.b)
+      program.setUniformf(uAmbientColorLoc, ambient.color.r * visual.sunIntensity, ambient.color.g * visual.sunIntensity, ambient.color.b * visual.sunIntensity)
     } else {
       program.setUniformf(uAmbientColorLoc, 0.4f, 0.4f, 0.4f)
     }
@@ -158,7 +164,7 @@ class WaterShader(
     val dirLight = (env?.get(DirectionalLightsAttribute.Type) as? DirectionalLightsAttribute)
       ?.lights?.firstOrNull()
     if (dirLight != null) {
-      program.setUniformf(uDirLightColorLoc, dirLight.color.r, dirLight.color.g, dirLight.color.b)
+      program.setUniformf(uDirLightColorLoc, dirLight.color.r * visual.sunIntensity, dirLight.color.g * visual.sunIntensity, dirLight.color.b * visual.sunIntensity)
       tmpDir.set(dirLight.direction).nor()
       program.setUniformf(uDirLightDirLoc, tmpDir)
     } else {
@@ -172,7 +178,7 @@ class WaterShader(
       program.setUniformf(uSpotLightPosLoc, spot.position)
       tmpDir.set(spot.direction).nor()
       program.setUniformf(uSpotLightDirLoc, tmpDir)
-      program.setUniformf(uSpotLightIntensityLoc, spot.intensity)
+      program.setUniformf(uSpotLightIntensityLoc, spot.intensity * visual.flashlightIntensity)
       program.setUniformf(uSpotLightCutoffLoc, spot.cutoffAngle)
     } else {
       program.setUniformf(uSpotLightIntensityLoc, 0f)
@@ -330,7 +336,7 @@ void main() {
     // Fully faded water has exactly the clear colour, so the far edge of the sea meets the sky seamlessly
     mediump vec3 fogTarget = mix(u_fogColor, u_skyColor, farAmount);
     if (fogAmount > 0.999) {
-        fragColor = vec4(fogTarget, 1.0);
+        fragColor = vec4(visualGrade(fogTarget), 1.0);
         return;
     }
 
@@ -404,7 +410,7 @@ void main() {
             mediump float spotSpec = pow(max(dot(N, halfDir), 0.0), 60.0) * 0.5;
             mediump float spotDiff = max(dot(N, spotL), 0.0);
             col += (waterColor * spotDiff * 0.6 + vec3(spotSpec)) *
-                u_spotLightColor * pow(cone, 1.35) * atten;
+                u_spotLightColor * spotShape(cone) * atten;
         }
     }
 
@@ -417,11 +423,13 @@ void main() {
 
     col = mix(col, fogTarget, fogAmount);
     alpha = mix(alpha, 1.0, fogAmount);
-    fragColor = vec4(col, alpha);
+    fragColor = vec4(visualGrade(col), alpha);
 }
 """
 
-    private const val FRAGMENT_SHADER_ES30 = FRAGMENT_HEADER_ES30 + FRAGMENT_BODY
-    private const val FRAGMENT_SHADER_ES20 = FRAGMENT_HEADER_ES20 + FRAGMENT_BODY
+    private const val FRAGMENT_SHADER_ES30 =
+      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+    private const val FRAGMENT_SHADER_ES20 =
+      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
   }
 }

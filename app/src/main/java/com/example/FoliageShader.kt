@@ -34,6 +34,10 @@ class FoliageShader : Shader {
   private lateinit var program: ShaderProgram
   private val loc = HashMap<String, Int>()
   private val tmpDir = Vector3()
+  private lateinit var gradeLocs: VisualGrade.Locations
+
+  /** Live visual calibration (grade, sun / ambient multiplier, flashlight). */
+  var visual: VisualSettings = VisualSettings()
 
   var time: Float = 0f
   var fogDensity: Float = 0f
@@ -47,6 +51,7 @@ class FoliageShader : Shader {
     program = ShaderProgram(VERTEX, FRAGMENT)
     if (!program.isCompiled) throw GdxRuntimeException("FoliageShader compile failed:\n${program.log}")
     for (name in UNIFORMS) loc[name] = program.getUniformLocation(name)
+    gradeLocs = VisualGrade.Locations(program, withSpot = true)
   }
 
   private fun u(name: String): Int = loc.getValue(name)
@@ -67,6 +72,7 @@ class FoliageShader : Shader {
     program.setUniformf(u("u_fogDensity"), fogDensity)
     program.setUniformf(u("u_fadeRange"), fadeStart, fadeEnd)
     program.setUniformf(u("u_smallFade"), smallFadeStart, smallFadeEnd)
+    gradeLocs.apply(program, visual)
     textureBinder = context.textureBinder
   }
 
@@ -93,12 +99,13 @@ class FoliageShader : Shader {
     else program.setUniformf(u("u_fogColor"), 0f, 0f, 0f)
 
     val ambient = env?.get(ColorAttribute.AmbientLight) as? ColorAttribute
-    if (ambient != null) program.setUniformf(u("u_ambientColor"), ambient.color.r, ambient.color.g, ambient.color.b)
+    val sun = visual.sunIntensity
+    if (ambient != null) program.setUniformf(u("u_ambientColor"), ambient.color.r * sun, ambient.color.g * sun, ambient.color.b * sun)
     else program.setUniformf(u("u_ambientColor"), 0.4f, 0.4f, 0.4f)
 
     val dir = (env?.get(DirectionalLightsAttribute.Type) as? DirectionalLightsAttribute)?.lights?.firstOrNull()
     if (dir != null) {
-      program.setUniformf(u("u_dirLightColor"), dir.color.r, dir.color.g, dir.color.b)
+      program.setUniformf(u("u_dirLightColor"), dir.color.r * sun, dir.color.g * sun, dir.color.b * sun)
       tmpDir.set(dir.direction).nor()
       program.setUniformf(u("u_dirLightDir"), tmpDir)
     } else {
@@ -112,7 +119,7 @@ class FoliageShader : Shader {
       program.setUniformf(u("u_spotLightPos"), spot.position)
       tmpDir.set(spot.direction).nor()
       program.setUniformf(u("u_spotLightDir"), tmpDir)
-      program.setUniformf(u("u_spotLightIntensity"), spot.intensity)
+      program.setUniformf(u("u_spotLightIntensity"), spot.intensity * visual.flashlightIntensity)
       program.setUniformf(u("u_spotLightCutoff"), spot.cutoffAngle)
     } else {
       program.setUniformf(u("u_spotLightIntensity"), 0f)
@@ -196,7 +203,7 @@ uniform mediump float u_spotLightIntensity;
 uniform mediump float u_spotLightCutoff;
 
 const mediump vec3 LUMA = vec3(0.30, 0.59, 0.11);
-
+""" + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + """
 void main() {
     mediump vec4 tex = texture2D(u_diffuse, v_uv);
     HP float camDist = length(u_cameraPos - v_pos);
@@ -225,14 +232,14 @@ void main() {
             mediump float cone = clamp((cosTheta - cutoffCos) / max(1.0 - cutoffCos, 0.0001), 0.0, 1.0);
             mediump float atten = u_spotLightIntensity / (1.0 + 0.16 * distSq);
             mediump float spotDiff = mix(max(dot(N, spotL), 0.0), 0.7, u_wrap);
-            lighting += albedo * spotDiff * u_spotLightColor * pow(cone, 1.35) * atten * 0.55;
+            lighting += albedo * spotDiff * u_spotLightColor * spotShape(cone) * atten * 0.55;
         }
     }
 
     HP float fogArg = camDist * u_fogDensity;
     mediump float fogAmount = clamp(1.0 - exp(-fogArg * fogArg), 0.0, 1.0);
     fogAmount = max(fogAmount, smoothstep(u_fadeRange.x, u_fadeRange.y, camDist));
-    gl_FragColor = vec4(mix(lighting, u_fogColor, fogAmount), 1.0);
+    gl_FragColor = vec4(visualGrade(mix(lighting, u_fogColor, fogAmount)), 1.0);
 }
 """
   }

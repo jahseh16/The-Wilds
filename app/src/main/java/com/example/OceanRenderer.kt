@@ -36,6 +36,11 @@ class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
   private val renderable = Renderable()
   private var clock = 0f
 
+  /** Live visual calibration, forwarded to the water shader. */
+  var visual: VisualSettings
+    get() = shader.visual
+    set(value) { shader.visual = value }
+
   init {
     val spanX = world.maxX - world.minX
     val spanZ = world.maxZ - world.minZ
