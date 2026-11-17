@@ -8,7 +8,8 @@ import com.badlogic.gdx.utils.Disposable
 import kotlin.random.Random
 
 /**
- * Footsteps, shovel digs and ambient wind.
+ * Footsteps (per ground surface, synchronised with the head bob by [PlayerController]), shovel digs,
+ * tree felling (strikes, creak, thud, log pickup) and ambient wind.
  *
  * Each sound is loaded from assets/sounds/{step,dig,wind}.ogg when the file exists. Otherwise a
  * short sound is synthesised in memory ([SynthSounds]) and handed to the audio backend through a
@@ -18,15 +19,27 @@ import kotlin.random.Random
 class SoundManager(
   private val soundsDir: String = "sounds",
   private val generatedDir: String = "generated_audio"
-) : Disposable {
+) : Disposable, FellingSounds {
 
-  private val stepSound: Sound? = loadSound("step") { SynthSounds.step() }
+  private val stepSounds: Map<SynthSounds.Surface, List<Sound>> = SynthSounds.Surface.values().associateWith { surface ->
+    (0 until STEP_VARIANTS).mapNotNull { v ->
+      loadSound("step_${surface.name.lowercase()}_$v") { SynthSounds.footstep(surface, v) }
+    }
+  }
+  private val chopSounds: List<Sound> = (0 until 3).mapNotNull { v -> loadSound("chop_$v") { SynthSounds.chop(v) } }
+  private val creakSound: Sound? = loadSound("creak") { SynthSounds.creak() }
+  private val thudSound: Sound? = loadSound("tree_thud") { SynthSounds.thud() }
   private val digSound: Sound? = loadSound("dig") { SynthSounds.dig() }
   private val wind: AmbientLoop? = loadWind()
 
   private val random = Random(System.nanoTime())
-  private var stepTimer = STEP_IDLE_DELAY
   private var windStarted = false
+  private var lastStepVariant = -1
+
+  /** Where the listener (the camera) is: world-space sounds are attenuated with the distance to it. */
+  private var listenerX = 0f
+  private var listenerY = 0f
+  private var listenerZ = 0f
 
   /** Master switch, e.g. for a future mute button. */
   var enabled: Boolean = true
@@ -35,30 +48,55 @@ class SoundManager(
       if (value) resumeAmbient() else pauseAmbient()
     }
 
-  /**
-   * Call once per frame. A footstep plays every [STEP_INTERVAL] seconds (slower and quieter when
-   * crawling) while the player is walking on the ground; stopping resets the stride.
-   */
-  fun update(delta: Float, walkingOnGround: Boolean, crawling: Boolean) {
+  /** Call once per frame: starts the ambient loop and moves the listener. */
+  fun update(listener: com.badlogic.gdx.math.Vector3) {
+    listenerX = listener.x; listenerY = listener.y; listenerZ = listener.z
     if (!enabled) return
     if (!windStarted) startAmbient()
-
-    if (!walkingOnGround) {
-      stepTimer = STEP_IDLE_DELAY
-      return
-    }
-    stepTimer -= delta
-    if (stepTimer <= 0f) {
-      playStep(crawling)
-      stepTimer += if (crawling) CRAWL_STEP_INTERVAL else STEP_INTERVAL
-    }
   }
 
-  fun playStep(crawling: Boolean = false) {
+  /** One footstep on [surface]; [intensity] from [PlayerController] (0.3 walk .. 1 run, more for landings). */
+  fun playFootstep(surface: SynthSounds.Surface, intensity: Float, crawling: Boolean) {
     if (!enabled) return
-    val pitch = (if (crawling) 0.80f else 0.92f) + random.nextFloat() * 0.20f
-    val volume = (if (crawling) 0.28f else 0.55f) * (0.9f + random.nextFloat() * 0.2f)
-    safely { stepSound?.play(volume, pitch, 0f) }
+    val list = stepSounds[surface].orEmpty()
+    if (list.isEmpty()) return
+    // never the same variant twice in a row
+    var v = random.nextInt(list.size)
+    if (list.size > 1 && v == lastStepVariant) v = (v + 1) % list.size
+    lastStepVariant = v
+    val pitch = (if (crawling) 0.85f else 0.94f) + random.nextFloat() * 0.12f
+    val volume = ((if (crawling) 0.30f else 0.32f + 0.38f * intensity) * (0.9f + random.nextFloat() * 0.2f)).coerceAtMost(1f)
+    safely { list[v].play(volume, pitch, 0f) }
+  }
+
+  // --- FellingSounds ------------------------------------------------------------------------
+
+  override fun chop(x: Float, y: Float, z: Float, hitIndex: Int) {
+    if (!enabled || chopSounds.isEmpty()) return
+    val pitch = 0.88f + 0.05f * (hitIndex % 4) + random.nextFloat() * 0.10f
+    safely { chopSounds[(hitIndex + random.nextInt(2)) % chopSounds.size].play(0.9f * attenuation(x, y, z), pitch, 0f) }
+  }
+
+  override fun creak(x: Float, y: Float, z: Float) {
+    if (!enabled) return
+    safely { creakSound?.play(0.75f * attenuation(x, y, z), 0.95f + random.nextFloat() * 0.1f, 0f) }
+  }
+
+  override fun thud(x: Float, y: Float, z: Float, strength: Float) {
+    if (!enabled) return
+    safely { thudSound?.play((0.45f + 0.55f * strength) * attenuation(x, y, z), 0.9f + random.nextFloat() * 0.15f, 0f) }
+  }
+
+  override fun pickup(x: Float, y: Float, z: Float) {
+    if (!enabled || chopSounds.isEmpty()) return
+    safely { chopSounds[0].play(0.45f, 1.35f, 0f) }
+  }
+
+  /** 1 within 4 m, falling off as 4/d (never below 0.12 so a nearby fall is always heard). */
+  private fun attenuation(x: Float, y: Float, z: Float): Float {
+    val dx = x - listenerX; val dy = y - listenerY; val dz = z - listenerZ
+    val d = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+    return (4f / d.coerceAtLeast(4f)).coerceAtLeast(0.12f)
   }
 
   fun playDig() {
@@ -83,7 +121,10 @@ class SoundManager(
 
   override fun dispose() {
     safely { wind?.dispose() }
-    safely { stepSound?.dispose() }
+    for (list in stepSounds.values) for (snd in list) safely { snd.dispose() }
+    for (snd in chopSounds) safely { snd.dispose() }
+    safely { creakSound?.dispose() }
+    safely { thudSound?.dispose() }
     safely { digSound?.dispose() }
   }
 
@@ -176,9 +217,7 @@ class SoundManager(
 
   private companion object {
     const val TAG = "SoundManager"
-    const val STEP_INTERVAL = 0.43f
-    const val CRAWL_STEP_INTERVAL = 0.78f
-    const val STEP_IDLE_DELAY = 0.10f
+    const val STEP_VARIANTS = 3
     const val WIND_VOLUME = 0.30f
   }
 }

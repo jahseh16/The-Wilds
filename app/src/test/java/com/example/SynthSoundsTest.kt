@@ -65,4 +65,43 @@ class SynthSoundsTest {
     assertEquals(pcm.size * 2, b.getInt(40))
     for (i in pcm.indices) assertEquals(pcm[i], b.getShort(44 + i * 2))
   }
+
+  private fun rms(pcm: ShortArray) = kotlin.math.sqrt(pcm.sumOf { it.toDouble() * it } / pcm.size)
+
+  /** RMS of the first difference / RMS of the signal: grows with the high-frequency content. */
+  private fun brightness(pcm: ShortArray): Double {
+    var d = 0.0; var a = 0.0
+    for (i in 1 until pcm.size) { val x = (pcm[i] - pcm[i - 1]).toDouble(); d += x * x; a += pcm[i].toDouble() * pcm[i] }
+    return kotlin.math.sqrt(d / a)
+  }
+
+  @Test
+  fun footstepsDifferPerSurfaceAndVariant() {
+    for (surface in SynthSounds.Surface.values()) {
+      val a = SynthSounds.footstep(surface, 0); val b = SynthSounds.footstep(surface, 1)
+      assertTrue("$surface audible", rms(a) > 500)
+      assertTrue("$surface short", a.size < SynthSounds.SAMPLE_RATE / 3)
+      assertTrue("$surface variants differ", !a.contentEquals(b))
+    }
+    val forest = brightness(SynthSounds.footstep(SynthSounds.Surface.FOREST, 0))
+    val sand = brightness(SynthSounds.footstep(SynthSounds.Surface.SAND, 0))
+    val rock = brightness(SynthSounds.footstep(SynthSounds.Surface.ROCK, 0))
+    println("brightness forest=$forest sand=$sand rock=$rock")
+    assertTrue("dry litter crunch is brighter than soft sand", forest > sand * 1.3)
+    assertTrue("rock click is brighter than sand", rock > sand * 1.3)
+  }
+
+  @Test
+  fun fellingSoundsAreShapedRight() {
+    val chop = SynthSounds.chop(0)
+    assertTrue(rms(chop) > 800 && chop.size < SynthSounds.SAMPLE_RATE / 2)
+    assertTrue(!chop.contentEquals(SynthSounds.chop(2)))
+    val creak = SynthSounds.creak()
+    assertTrue("creak lasts ${creak.size / SynthSounds.SAMPLE_RATE.toFloat()} s", creak.size > SynthSounds.SAMPLE_RATE)
+    assertTrue(rms(creak) > 500)
+    val thud = SynthSounds.thud()
+    assertTrue(rms(thud) > 1500)
+    // the thud is dark (mostly low frequencies), the chop bright
+    assertTrue(brightness(thud) < brightness(chop))
+  }
 }

@@ -15,6 +15,7 @@ import com.badlogic.gdx.graphics.g3d.ModelBatch
 import com.badlogic.gdx.graphics.g3d.ModelInstance
 import com.badlogic.gdx.graphics.g3d.attributes.ColorAttribute
 import com.badlogic.gdx.graphics.g3d.attributes.FloatAttribute
+import com.badlogic.gdx.graphics.g3d.attributes.TextureAttribute
 import com.badlogic.gdx.graphics.g3d.environment.DirectionalLight
 import com.badlogic.gdx.graphics.g3d.environment.SpotLight
 import com.badlogic.gdx.graphics.g3d.shaders.DefaultShader
@@ -70,6 +71,19 @@ class GameScreen : Screen {
   private val foliageShader: FoliageShader
   private val solidAtlas: Texture
   private val cutoutAtlas: Texture
+  private val barkColorTex: Texture
+  private val barkNormalTex: Texture
+  private val felling: TreeFellingSystem
+
+  // Body feel: head bob, landing dip, strafe tilt, footsteps
+  private val playerController = PlayerController()
+  private var landingSpeedThisFrame = 0f
+  private var lastPlayerX = 0f
+  private var lastPlayerZ = 0f
+  private val surfaceBiome = FloatArray(4)
+  private val aimTreeHit = Vector3()
+  private var aimTree: WorldPopulator.Tree? = null
+  private var aimLogDistance = -1f
   private var foliageClock = 0f
 
   // First-person 3D shovel viewmodel
@@ -78,7 +92,6 @@ class GameScreen : Screen {
   private val cameraWorldMatrix = Matrix4()
   private val shovelLocalMatrix = Matrix4()
   private var swingTimer: Float = -1f
-  private var walkBobTime: Float = 0f
 
   // Player spatial, stance & vertical physics state
   private var playerX: Float
@@ -113,14 +126,34 @@ class GameScreen : Screen {
     solidAtlas = AtlasBuilder.build(Layer.SOLID)
     cutoutAtlas = AtlasBuilder.build(Layer.CUTOUT)
     foliageShader = FoliageShader().apply { visual = this@GameScreen.visual; init() }
+    // Pine bark: its own repeating, normal-mapped texture pair (not in the atlas)
+    barkColorTex = loadBarkTexture("models/trees/tree_01_bark_diff.jpg")
+    barkNormalTex = loadBarkTexture("models/trees/tree_01_bark_nor.jpg")
+    val barkMaterial = Material(
+      FoliageShader.LAYER_BARK,
+      TextureAttribute.createDiffuse(barkColorTex),
+      TextureAttribute.createNormal(barkNormalTex)
+    )
+    val models = ScatterModels { path -> Gdx.files.internal(path).readString() }
     populator = WorldPopulator(
       chunkManager,
-      ScatterModels { path -> Gdx.files.internal(path).readString() },
+      models,
       solidAtlas,
       cutoutAtlas,
+      barkMaterial,
       listOf(Clearing(spawn.x, spawn.z, ChunkManager.SPAWN_CLEARING_RADIUS))
     )
     chunkManager.addListener(populator)
+    felling = TreeFellingSystem(
+      populator,
+      models,
+      Material(FoliageShader.LAYER_CUTOUT, TextureAttribute.createDiffuse(cutoutAtlas)),
+      ground = { x, z -> chunkManager.terrain.heightAt(x, z) },
+      sounds = soundManager
+    )
+    playerController.stepListener = PlayerController.StepListener { intensity, _ ->
+      soundManager.playFootstep(surfaceUnderPlayer(), intensity, isActuallyCrawling)
+    }
     playerX = spawn.x
     playerZ = spawn.z
     playerFeetY = spawn.y
@@ -206,6 +239,27 @@ class GameScreen : Screen {
     visualPrefs.flush()
   }
 
+  private fun loadBarkTexture(internalPath: String): Texture =
+    Texture(Gdx.files.internal(internalPath), true).apply {
+      setWrap(Texture.TextureWrap.Repeat, Texture.TextureWrap.Repeat)
+      setFilter(Texture.TextureFilter.MipMapLinearLinear, Texture.TextureFilter.Linear)
+    }
+
+  /** Footstep timbre from the ground under the player: leaf litter, meadow, beach sand or rock. */
+  private fun surfaceUnderPlayer(): SynthSounds.Surface {
+    val t = chunkManager.terrain
+    // Inside a dug tunnel the floor is bare earth / rock
+    if (playerFeetY < t.heightAt(playerX, playerZ) - 1.2f) return SynthSounds.Surface.ROCK
+    t.biomeAt(playerX, playerZ, surfaceBiome)
+    val forest = surfaceBiome[0]; val gravel = surfaceBiome[1]; val h = surfaceBiome[2]; val slope = surfaceBiome[3]
+    return when {
+      gravel > 0.55f || slope > 0.75f || t.rockZoneAt(playerX, playerZ) > 0.55f -> SynthSounds.Surface.ROCK
+      h < 3.0f -> SynthSounds.Surface.SAND
+      forest > 0.35f -> SynthSounds.Surface.FOREST
+      else -> SynthSounds.Surface.GRASS
+    }
+  }
+
   private fun loadTerrainTexture(internalPath: String): Texture =
     // Mipmaps are generated here; min/mag filtering and anisotropy are set by TerrainShader.init()
     Texture(Gdx.files.internal(internalPath), true).apply {
@@ -243,14 +297,18 @@ class GameScreen : Screen {
     foliageShader.fadeStart = terrainShader.fadeStart
     hudStage.setPhaseLabel(dayNight.phase.label)
 
+    lastPlayerX = playerX
+    lastPlayerZ = playerZ
+    landingSpeedThisFrame = 0f
     updatePlayerPhysics(dt)
-    val walkingOnGround = (hudStage.moveX != 0f || hudStage.moveY != 0f) && isGrounded
-    soundManager.update(dt, walkingOnGround, isActuallyCrawling)
-    camera.update()
+    applyBodyFeel(dt)
+    soundManager.update(camera.position)
     oceanRenderer.update(dt, camera.position, dayNight.fogDensity, camera.far, dayNight.skyColor)
     updateFlashlight()
     updateAimAndExcavation(dt)
     updateShovelViewmodel(dt)
+    felling.update(dt, camera.position)
+    hudStage.setWoodCount(felling.wood)
 
     Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
     // The sky gets the same grade as the shaders apply to everything else, so the horizon still matches
@@ -266,7 +324,8 @@ class GameScreen : Screen {
     modelBatch.begin(camera)
     chunkManager.renderVisible(modelBatch, environment, terrainShader, camera.frustum)
     populator.render(modelBatch, environment, foliageShader, camera.frustum)
-    if (hasAimHit) {
+    felling.render(modelBatch, environment, foliageShader)
+    if (showDigRing) {
       modelBatch.render(chunkManager.aimIndicatorInstance)
     }
     // The sea blends over the terrain, so ModelBatch draws it after every opaque renderable
@@ -309,10 +368,6 @@ class GameScreen : Screen {
 
       tryMoveHorizontalAxis(deltaX = stepX, deltaZ = 0f, bodyHeight = activeHeadHeight)
       tryMoveHorizontalAxis(deltaX = 0f, deltaZ = stepZ, bodyHeight = activeHeadHeight)
-
-      if (isGrounded) {
-        walkBobTime += dt * (if (isActuallyCrawling) 7.5f else 10.5f)
-      }
     }
 
     // 2. Jump trigger when grounded and overhead clearance is free
@@ -345,6 +400,7 @@ class GameScreen : Screen {
       } else {
         if (isSolidFeet(playerX, nextFeetY, playerZ)) {
           playerFeetY = resolveLandingY(playerX, playerFeetY, nextFeetY, playerZ)
+          landingSpeedThisFrame = -verticalVelocity
           verticalVelocity = 0f
           isGrounded = true
         } else {
@@ -359,6 +415,25 @@ class GameScreen : Screen {
     currentEyeHeight += (targetEyeHeight - currentEyeHeight) * lerpAlpha
 
     camera.position.set(playerX, playerFeetY + currentEyeHeight, playerZ)
+  }
+
+  /**
+   * Weight: head bob + side sway from the real walking speed, the landing dip, a lean into strafes,
+   * and the footsteps (fired by [PlayerController] on every foot plant).
+   */
+  private fun applyBodyFeel(dt: Float) {
+    val dx = playerX - lastPlayerX; val dz = playerZ - lastPlayerZ
+    val speed = kotlin.math.sqrt(dx * dx + dz * dz) / dt.coerceAtLeast(1e-4f)
+    playerController.update(dt, speed, hudStage.moveX, isGrounded, isActuallyCrawling, landingSpeedThisFrame)
+
+    updateCameraOrientation()
+    rightXZ.set(camera.direction).crs(Vector3.Y)
+    if (rightXZ.len2() > 1e-6f) rightXZ.nor() else rightXZ.set(1f, 0f, 0f)
+    camera.position.y += playerController.eyeOffset
+    camera.position.mulAdd(rightXZ, playerController.bobLateral)
+    // Roll: tilt the up vector around the view direction
+    camera.up.set(Vector3.Y).rotate(camera.direction, playerController.rollDegrees)
+    camera.update()
   }
 
   private fun tryMoveHorizontalAxis(deltaX: Float, deltaZ: Float, bodyHeight: Float) {
@@ -515,13 +590,23 @@ class GameScreen : Screen {
       if (hasAimHit) {
         chunkManager.updateAimIndicator(aimHitPoint)
       }
+      updateAimTargets()
     }
 
     if (digPressed) {
       // Trigger smooth shovel swing animation immediately on dig tap
       swingTimer = 0f
 
-      if (hasAimHit) {
+      val tree = aimTree
+      if (aimLogDistance >= 0f) {
+        // Pick up the log under the crosshair
+        felling.collect(camera.position, camera.direction, MAX_CHOP_RANGE)
+        updateAimTargets()
+      } else if (tree != null) {
+        // Strike the trunk (the last strike fells it, away from the player)
+        felling.chop(tree, aimTreeHit, playerX, playerZ)
+        updateAimTargets()
+      } else if (hasAimHit) {
         chunkManager.excavateSphere(
           center = aimHitPoint,
           radius = DIG_SPHERE_RADIUS,
@@ -545,6 +630,33 @@ class GameScreen : Screen {
       }
     }
   }
+
+  /**
+   * What the action button would hit: a log (pick it up), a pine trunk (chop) or the ground (dig),
+   * whichever is nearest along the view ray. Also relabels the button and hides the dig ring when
+   * a tree or a log is targeted.
+   */
+  private fun updateAimTargets() {
+    val terrainDist = if (hasAimHit) aimHitPoint.dst(camera.position) else Float.MAX_VALUE
+    val tree = populator.raycastTree(camera.position, camera.direction, MAX_CHOP_RANGE, CHOP_REACH_HEIGHT, aimTreeHit)
+    val treeDist = if (tree != null) aimTreeHit.dst(camera.position) else Float.MAX_VALUE
+    val logDist = felling.raycastLog(camera.position, camera.direction, MAX_CHOP_RANGE)
+    aimTree = null
+    aimLogDistance = -1f
+    when {
+      logDist >= 0f && logDist < treeDist && logDist < terrainDist + 0.4f -> aimLogDistance = logDist
+      tree != null && treeDist < terrainDist + 0.2f -> aimTree = tree
+    }
+    hudStage.setActionLabel(
+      when {
+        aimLogDistance >= 0f -> "RECOGER"
+        aimTree != null -> "TALAR"
+        else -> "CAVAR"
+      }
+    )
+  }
+
+  private val showDigRing: Boolean get() = hasAimHit && aimTree == null && aimLogDistance < 0f
 
   private fun updateShovelViewmodel(dt: Float) {
     var swingForward = 0f
@@ -573,8 +685,9 @@ class GameScreen : Screen {
       }
     }
 
-    val bobX = sin(walkBobTime) * 0.012f
-    val bobY = cos(walkBobTime * 2f) * 0.010f
+    val gait = playerController.phase
+    val bobX = sin(gait) * 0.012f * playerController.envelope
+    val bobY = (kotlin.math.abs(sin(gait)) - 0.5f) * 0.020f * playerController.envelope - playerController.landingOffset * 0.35f
 
     // Place shovel in bottom-right corner of camera view space
     cameraWorldMatrix.set(camera.view).inv()
@@ -694,6 +807,9 @@ class GameScreen : Screen {
     foliageShader.dispose()
     solidAtlas.dispose()
     cutoutAtlas.dispose()
+    felling.dispose()
+    barkColorTex.dispose()
+    barkNormalTex.dispose()
     grassColorTex.dispose()
     grassNormalTex.dispose()
     dirtColorTex.dispose()
@@ -740,6 +856,10 @@ class GameScreen : Screen {
     const val DIG_SPHERE_STRENGTH = 4.2f
 
     const val SHOVEL_SWING_DURATION = 0.32f
+
+    // Chopping: reach of a strike and how high up the trunk the arms reach
+    const val MAX_CHOP_RANGE = 2.8f
+    const val CHOP_REACH_HEIGHT = 2.6f
 
     const val FLASHLIGHT_INTENSITY = 32f
     const val FLASHLIGHT_CUTOFF_ANGLE = 30f

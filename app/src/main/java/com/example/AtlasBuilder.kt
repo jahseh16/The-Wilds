@@ -18,7 +18,7 @@ object AtlasBuilder {
     atlas.setColor(0f, 0f, 0f, 0f)
     atlas.fill()
     for (cell in AtlasLayout.cells(layer).values) {
-      val source = Pixmap(Gdx.files.internal(cell.file))
+      val source = cell.file?.let { Pixmap(Gdx.files.internal(it)) } ?: generated(cell)
       atlas.drawPixmap(source, 0, 0, source.width, source.height, cell.x, cell.y, cell.size, cell.size)
       source.dispose()
     }
@@ -27,5 +27,18 @@ object AtlasBuilder {
     texture.setFilter(Texture.TextureFilter.MipMapLinearLinear, Texture.TextureFilter.Linear)
     texture.setWrap(Texture.TextureWrap.ClampToEdge, Texture.TextureWrap.ClampToEdge)
     return texture
+  }
+
+  /** Cells without a file are drawn procedurally (the pine needles). */
+  private fun generated(cell: AtlasLayout.Cell): Pixmap {
+    val pixels = PineTreeGenerator.needleTexture(cell.size)
+    val pixmap = Pixmap(cell.size, cell.size, Pixmap.Format.RGBA8888)
+    val buffer = pixmap.pixels
+    buffer.clear()
+    for (p in pixels) {
+      buffer.put((p ushr 24).toByte()); buffer.put((p ushr 16).toByte()); buffer.put((p ushr 8).toByte()); buffer.put(p.toByte())
+    }
+    buffer.flip()
+    return pixmap
   }
 }

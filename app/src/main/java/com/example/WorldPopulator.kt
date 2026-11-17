@@ -25,10 +25,16 @@ import kotlin.math.sqrt
 
 /**
  * Grows the ecosystem of the island as the terrain streams in: it is a [ChunkListener], so every
- * chunk that [ChunkManager] loads gets its trees, shrubs, boulders, pebbles, sticks and ground cover
- * seeded deterministically by [WorldScatter] and merged into two meshes (one per [Layer]) by
- * [ChunkScatterMesh]: a chunk's whole ecosystem costs two draw calls, culled with the chunk's frustum bounds.
- * Trees and boulders farther than [LOD_RADIUS] use ~530 / 300 triangle stand-ins instead of 2200 / 1200.
+ * chunk that [ChunkManager] loads gets its pines, shrubs, boulders, pebbles, sticks and ground cover
+ * seeded deterministically by [WorldScatter] and merged into one mesh per [Layer] by
+ * [ChunkScatterMesh]: a chunk's whole ecosystem costs at most three draw calls (atlas opaque, atlas
+ * alpha-tested, pine bark), culled with the chunk's frustum bounds. Pines and boulders farther than
+ * [LOD_RADIUS] use ~200 / 300 triangle stand-ins instead of ~1050 / 1200.
+ *
+ * Felling: every pine has a [Tree] record (its vertex ranges in the merged meshes and its collider).
+ * [fell] hides the trunk + crown by collapsing just those vertices in the chunk meshes (no re-meshing:
+ * libGDX re-uploads the buffer once on its next bind), lowers the collider to the stump, and remembers the tree id so the chunk
+ * comes back with only the stump after streaming out and in again.
  *
  * Work is budgeted: at most one chunk is (re)built per [update] call, nearest first. The "far" content
  * (trees, shrubs, boulders, beach patches) is built when the chunk loads; the "near" content (grass,
@@ -42,34 +48,48 @@ class WorldPopulator(
   private val models: ScatterModels,
   private val solidAtlas: Texture,
   private val cutoutAtlas: Texture,
+  /** Pine bark: diffuse + normal map, repeat wrap (see [FoliageShader.LAYER_BARK]). */
+  val barkMaterial: Material,
   private val clearings: List<Clearing>
 ) : ChunkListener, Disposable {
 
-  private inner class Props(val cx: Int, val cz: Int) : RenderableProvider {
+  /** One pine of a chunk: what [fell] needs. */
+  inner class Tree(val placement: Placement, val spec: PineSpec, val colliderIndex: Int) {
+    val ranges = ArrayList<TreeRange>()
+    val x: Float get() = placement.x
+    val y: Float get() = placement.y
+    val z: Float get() = placement.z
+    val scale: Float get() = placement.scale
+    val height: Float get() = spec.height * placement.scale
+    val trunkRadius: Float get() = spec.baseRadius * placement.scale
+    lateinit var owner: Props
+      internal set
+  }
+
+  inner class Props(val cx: Int, val cz: Int) : RenderableProvider {
     var far: ArrayList<Placement>? = null
     var near: ArrayList<Placement>? = null
     var builtNear = false
     var builtLod = false
     var built = false
-    var solidMesh: Mesh? = null
-    var cutoutMesh: Mesh? = null
-    val solid = Renderable()
-    val cutout = Renderable()
+    val meshes = arrayOfNulls<Mesh>(Layer.values().size)
+    val renderables = Array(Layer.values().size) { Renderable() }
     val bounds = BoundingBox()
     var hasGeometry = false
     /** x, z, radius, bottomY, topY per cylinder. */
     var colliders = FloatArray(0)
+    var trees = ArrayList<Tree>()
     var instances = 0
     var triangles = 0
 
     override fun getRenderables(renderables: GdxArray<Renderable>, pool: Pool<Renderable>) {
-      if (solidMesh != null) renderables.add(solid)
-      if (cutoutMesh != null) renderables.add(cutout)
+      for (i in meshes.indices) if (meshes[i] != null) renderables.add(this.renderables[i])
     }
 
+    val meshCount: Int get() = meshes.count { it != null }
+
     fun disposeMeshes() {
-      solidMesh?.dispose(); solidMesh = null
-      cutoutMesh?.dispose(); cutoutMesh = null
+      for (i in meshes.indices) { meshes[i]?.dispose(); meshes[i] = null }
     }
   }
 
@@ -77,8 +97,15 @@ class WorldPopulator(
   private val all = ArrayList<Props>()
   private val chunkSize = Chunk.SIZE_X * world.voxelSize
 
-  private val solidMaterial = Material(FoliageShader.LAYER_SOLID, TextureAttribute.createDiffuse(solidAtlas))
-  private val cutoutMaterial = Material(FoliageShader.LAYER_CUTOUT, TextureAttribute.createDiffuse(cutoutAtlas))
+  private val materials = arrayOf(
+    Material(FoliageShader.LAYER_SOLID, TextureAttribute.createDiffuse(solidAtlas)),
+    Material(FoliageShader.LAYER_CUTOUT, TextureAttribute.createDiffuse(cutoutAtlas)),
+    barkMaterial
+  )
+
+  /** Ids of the trees chopped down this session (survive chunk streaming). */
+  private val felledIds = HashSet<Long>()
+  private var zeroVertices = FloatArray(0)
 
   /** Resident chunks that have content, and the instances / triangles drawn by them (debug / budgeting). */
   var instanceCount = 0
@@ -136,8 +163,9 @@ class WorldPopulator(
   private fun build(p: Props, wantNear: Boolean, wantLod: Boolean) {
     val far = p.far ?: ArrayList<Placement>().also {
       WorldScatter.planFar(world.terrain, p.cx, p.cz, chunkSize, clearings, it)
+      for (pl in it) if (pl.kind.isTree && pl.id in felledIds) pl.felled = true
       p.far = it
-      p.colliders = buildColliders(it)
+      buildColliders(p, it)
     }
     val list = ArrayList<Placement>(far.size + 256)
     list.addAll(far)
@@ -155,21 +183,24 @@ class WorldPopulator(
     triangleCount -= p.triangles
     p.disposeMeshes()
 
-    val (solid, cutout) = ChunkScatterMesh.build(list, models, wantLod)
-    p.solidMesh = solid?.let { toMesh(it) }
-    p.cutoutMesh = cutout?.let { toMesh(it) }
-    configure(p.solid, solidMaterial, p.solidMesh, solid)
-    configure(p.cutout, cutoutMaterial, p.cutoutMesh, cutout)
-
+    val result = ChunkScatterMesh.build(list, models, wantLod)
     p.bounds.inf()
-    for (layer in listOf(solid, cutout)) {
-      if (layer == null) continue
-      p.bounds.ext(layer.minX - BOUNDS_PAD, layer.minY - BOUNDS_PAD, layer.minZ - BOUNDS_PAD)
-      p.bounds.ext(layer.maxX + BOUNDS_PAD, layer.maxY + BOUNDS_PAD, layer.maxZ + BOUNDS_PAD)
+    for (layer in Layer.values()) {
+      val data = result.layers[layer]
+      val mesh = data?.let { toMesh(it) }
+      p.meshes[layer.ordinal] = mesh
+      configure(p.renderables[layer.ordinal], materials[layer.ordinal], mesh, data)
+      if (data == null) continue
+      p.bounds.ext(data.minX - BOUNDS_PAD, data.minY - BOUNDS_PAD, data.minZ - BOUNDS_PAD)
+      p.bounds.ext(data.maxX + BOUNDS_PAD, data.maxY + BOUNDS_PAD, data.maxZ + BOUNDS_PAD)
     }
-    p.hasGeometry = solid != null || cutout != null
+    // Which vertices belong to which pine (trees are the first placements: they come from the far list)
+    val byPlacement = HashMap<Placement, Tree>()
+    for (t in p.trees) { t.ranges.clear(); byPlacement[t.placement] = t }
+    for (r in result.treeRanges) byPlacement[list[r.placementIndex]]?.ranges?.add(r)
+    p.hasGeometry = result.layers.values.any { it != null }
     p.instances = list.size
-    p.triangles = ((solid?.indexCount ?: 0) + (cutout?.indexCount ?: 0)) / 3
+    p.triangles = result.triangleCount
     instanceCount += p.instances
     triangleCount += p.triangles
     p.built = true
@@ -182,7 +213,8 @@ class WorldPopulator(
       true, data.vertexCount, data.indexCount,
       VertexAttribute.Position(), VertexAttribute.Normal(), VertexAttribute.TexCoords(0),
       VertexAttribute(VertexAttributes.Usage.Generic, 1, "a_sway"),
-      VertexAttribute(VertexAttributes.Usage.Generic, 1, "a_near")
+      VertexAttribute(VertexAttributes.Usage.Generic, 1, "a_near"),
+      VertexAttribute(VertexAttributes.Usage.Generic, 1, "a_ao")
     )
     mesh.setVertices(data.vertices, 0, data.vertexCount * ChunkScatterMesh.FLOATS)
     mesh.setIndices(data.indices, 0, data.indexCount)
@@ -206,7 +238,7 @@ class WorldPopulator(
     for (p in all) {
       if (!p.hasGeometry || !frustum.boundsInFrustum(p.bounds)) continue
       batch.render(p, environment, shader)
-      calls += (if (p.solidMesh != null) 1 else 0) + (if (p.cutoutMesh != null) 1 else 0)
+      calls += p.meshCount
     }
     drawCalls = calls
     return calls
@@ -214,28 +246,89 @@ class WorldPopulator(
 
   // --- Collision -----------------------------------------------------------------------------------
 
-  private fun buildColliders(placements: List<Placement>): FloatArray {
+  private fun buildColliders(p: Props, placements: List<Placement>) {
     val out = ArrayList<Float>()
-    for (p in placements) {
-      val cos = cos(p.yaw); val sin = sin(p.yaw)
-      when (p.kind) {
-        Kind.TREE -> {
-          val ox = (cos * models.trunkCenterX + sin * models.trunkCenterZ) * p.scale
-          val oz = (-sin * models.trunkCenterX + cos * models.trunkCenterZ) * p.scale
-          out.add(p.x + ox); out.add(p.z + oz)
-          out.add(models.trunkRadius * p.scale * TRUNK_COLLIDER_SHRINK)
-          out.add(p.y); out.add(p.y + TREE_COLLIDER_HEIGHT * p.scale)
+    p.trees = ArrayList()
+    for (pl in placements) {
+      when {
+        pl.kind.isTree -> {
+          val spec = models.pineSpec(pl.kind)
+          val tree = Tree(pl, spec, out.size).also { it.owner = p }
+          p.trees.add(tree)
+          out.add(pl.x); out.add(pl.z)
+          out.add(spec.baseRadius * pl.scale * TRUNK_COLLIDER_SHRINK)
+          out.add(pl.y - PineTreeGenerator.STUMP_BURY)
+          out.add(pl.y + if (pl.felled) PineTreeGenerator.STUMP_TOP * pl.scale else spec.height * pl.scale)
         }
-        Kind.ROCK -> {
-          out.add(p.x); out.add(p.z)
-          out.add(models.rockRadius * p.scale)
-          out.add(p.y - 0.12f * models.rockHeight * p.scale); out.add(p.y + 0.88f * models.rockHeight * p.scale)
+        pl.kind == Kind.ROCK -> {
+          out.add(pl.x); out.add(pl.z)
+          out.add(models.rockRadius * pl.scale)
+          out.add(pl.y - 0.12f * models.rockHeight * pl.scale); out.add(pl.y + 0.88f * models.rockHeight * pl.scale)
         }
         else -> Unit
       }
     }
-    return out.toFloatArray()
+    p.colliders = out.toFloatArray()
   }
+
+  // --- Trees: aiming and felling --------------------------------------------------------------
+
+  /**
+   * Nearest standing pine trunk hit by the ray within [maxDistance] (and below [reachHeight] metres
+   * above its base, i.e. where an arm can strike). Writes the hit point into [outHit] and returns
+   * the tree, or null.
+   */
+  fun raycastTree(origin: Vector3, direction: Vector3, maxDistance: Float, reachHeight: Float, outHit: Vector3): Tree? {
+    val dx = direction.x; val dz = direction.z
+    val a = dx * dx + dz * dz
+    if (a < 1e-8f) return null
+    var best: Tree? = null
+    var bestT = maxDistance
+    val cx0 = floor(origin.x / chunkSize).toInt(); val cz0 = floor(origin.z / chunkSize).toInt()
+    for (cz in cz0 - 1..cz0 + 1) for (cx in cx0 - 1..cx0 + 1) {
+      val p = byKey[Chunk.key(cx, cz)] ?: continue
+      for (t in p.trees) {
+        if (t.placement.felled) continue
+        val r = t.trunkRadius * AIM_RADIUS_SCALE
+        val ox = origin.x - t.x; val oz = origin.z - t.z
+        val b = 2f * (ox * dx + oz * dz)
+        val c = ox * ox + oz * oz - r * r
+        val disc = b * b - 4f * a * c
+        if (disc < 0f) continue
+        val hitT = (-b - sqrt(disc)) / (2f * a)
+        if (hitT < 0f || hitT >= bestT) continue
+        val y = origin.y + direction.y * hitT
+        if (y < t.y - 0.3f || y > t.y + minOf(reachHeight, t.height)) continue
+        best = t; bestT = hitT
+      }
+    }
+    if (best != null) outHit.set(origin).mulAdd(direction, bestT)
+    return best
+  }
+
+  /**
+   * Chops [tree] down: its trunk and crown disappear from the chunk meshes (their vertices are
+   * collapsed to a point, so the triangles become degenerate), its collider shrinks to the stump, and it stays felled for the session.
+   */
+  fun fell(tree: Tree) {
+    if (tree.placement.felled) return
+    tree.placement.felled = true
+    felledIds.add(tree.placement.id)
+    val p = tree.owner
+    for (r in tree.ranges) {
+      val mesh = p.meshes[r.layer.ordinal] ?: continue
+      val n = r.vertexCount * ChunkScatterMesh.FLOATS
+      if (zeroVertices.size < n) zeroVertices = FloatArray(n)
+      mesh.updateVertices(r.firstVertex * ChunkScatterMesh.FLOATS, zeroVertices, 0, n)
+    }
+    tree.ranges.clear()
+    if (tree.colliderIndex + 4 < p.colliders.size) {
+      p.colliders[tree.colliderIndex + 4] = tree.y + PineTreeGenerator.STUMP_TOP * tree.scale
+    }
+  }
+
+  /** Number of trees felled this session. */
+  val felledCount: Int get() = felledIds.size
 
   /**
    * True if a body at ([toX], [toZ]) with [bodyRadius] and feet at [feetY] (height [bodyHeight])
@@ -281,11 +374,12 @@ class WorldPopulator(
     const val NEAR_DROP_RADIUS = 56f
 
     /** Chunks whose centre is farther than this get the low-triangle trees and boulders (back to full detail inside the second radius). */
-    const val LOD_RADIUS = 66f
-    const val LOD_BACK_RADIUS = 58f
+    const val LOD_RADIUS = 52f
+    const val LOD_BACK_RADIUS = 45f
     private const val BOUNDS_PAD = 0.6f
-    private const val TREE_COLLIDER_HEIGHT = 3.2f
-    private const val TRUNK_COLLIDER_SHRINK = 0.9f
+    private const val TRUNK_COLLIDER_SHRINK = 0.95f
+    /** Aiming at a trunk is a little forgiving (thin trunks on a phone screen). */
+    private const val AIM_RADIUS_SCALE = 1.25f
     private const val STEP_UP = 0.35f
   }
 }

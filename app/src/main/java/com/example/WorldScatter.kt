@@ -4,8 +4,8 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-/** Which batched mesh (and texture atlas) a part of a model is drawn with. */
-enum class Layer { SOLID, CUTOUT }
+/** Which batched mesh (and texture) a part of a model is drawn with: atlas opaque, atlas alpha-tested, or pine bark (repeating, normal-mapped). */
+enum class Layer { SOLID, CUTOUT, BARK }
 
 /** One material group of an OBJ model: its atlas cell and how much wind sways its tip (metres, unscaled). */
 class Part(val group: String, val layer: Layer, val cell: String, val wind: Float)
@@ -13,43 +13,59 @@ class Part(val group: String, val layer: Layer, val cell: String, val wind: Floa
 /**
  * Everything the world populator can place. [near] kinds are the small ground cover and litter that
  * are only generated close to the player (and fade out with distance); the rest is seeded for the
- * whole streamed area.
+ * whole streamed area. Pines ([pine] >= 0) have no file: [PineTreeGenerator] builds them.
  */
-enum class Kind(val file: String, val near: Boolean, vararg val parts: Part) {
-  TREE("models/trees/tree_01.obj", false, Part("bark", Layer.SOLID, "bark", 0f), Part("leaves", Layer.CUTOUT, "leaves", 0.12f)),
-  /** ~530-triangle stand-in for [TREE] used by chunks far from the player. */
-  TREE_LOD("models/trees/tree_01_lod1.obj", false, Part("bark", Layer.SOLID, "bark", 0f), Part("leaves", Layer.CUTOUT, "leaves", 0.12f)),
-  SHRUB("models/foliage/shrub_01.obj", false, Part("card", Layer.CUTOUT, "shrub", 0.05f)),
-  ROCK("models/props/rock_boulder_01.obj", false, Part("rock", Layer.SOLID, "rock", 0f)),
+enum class Kind(val file: String?, val near: Boolean, val pine: Int, vararg val parts: Part) {
+  PINE_1(null, false, 0),
+  PINE_2(null, false, 1),
+  PINE_3(null, false, 2),
+  /** ~250-triangle stand-ins for the pines used by chunks far from the player. */
+  PINE_1_LOD(null, false, 0),
+  PINE_2_LOD(null, false, 1),
+  PINE_3_LOD(null, false, 2),
+  SHRUB("models/foliage/shrub_01.obj", false, -1, Part("card", Layer.CUTOUT, "shrub", 0.05f)),
+  ROCK("models/props/rock_boulder_01.obj", false, -1, Part("rock", Layer.SOLID, "rock", 0f)),
   /** 300-triangle stand-in for [ROCK] used by chunks far from the player. */
-  ROCK_LOD("models/props/rock_boulder_01_lod1.obj", false, Part("rock", Layer.SOLID, "rock", 0f)),
-  PEBBLE_PATCH("models/props/pebble_patch_01.obj", true, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
-  PEBBLE_1("models/props/pebble_01.obj", true, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
-  PEBBLE_2("models/props/pebble_02.obj", true, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
-  PEBBLE_3("models/props/pebble_03.obj", true, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
-  STICK_1("models/props/stick_01.obj", true, Part("sticks", Layer.SOLID, "sticks", 0f)),
-  STICK_2("models/props/stick_02.obj", true, Part("sticks", Layer.SOLID, "sticks", 0f)),
-  STICK_3("models/props/stick_03.obj", true, Part("sticks", Layer.SOLID, "sticks", 0f)),
-  GRASS_1("models/foliage/grass_01.obj", true, Part("card", Layer.CUTOUT, "grass_01", 0.05f)),
-  GRASS_2("models/foliage/grass_02.obj", true, Part("card", Layer.CUTOUT, "grass_02", 0.06f)),
-  GRASS_3("models/foliage/grass_03.obj", true, Part("card", Layer.CUTOUT, "grass_03", 0.06f)),
-  FERN("models/foliage/fern_01.obj", true, Part("card", Layer.CUTOUT, "fern", 0.04f)),
-  DANDELION("models/foliage/dandelion_01.obj", true, Part("card", Layer.CUTOUT, "dandelion", 0.05f)),
-  WEED("models/foliage/weed_01.obj", true, Part("card", Layer.CUTOUT, "weed", 0.01f));
+  ROCK_LOD("models/props/rock_boulder_01_lod1.obj", false, -1, Part("rock", Layer.SOLID, "rock", 0f)),
+  PEBBLE_PATCH("models/props/pebble_patch_01.obj", true, -1, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
+  PEBBLE_1("models/props/pebble_01.obj", true, -1, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
+  PEBBLE_2("models/props/pebble_02.obj", true, -1, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
+  PEBBLE_3("models/props/pebble_03.obj", true, -1, Part("pebbles", Layer.SOLID, "pebbles", 0f)),
+  STICK_1("models/props/stick_01.obj", true, -1, Part("sticks", Layer.SOLID, "sticks", 0f)),
+  STICK_2("models/props/stick_02.obj", true, -1, Part("sticks", Layer.SOLID, "sticks", 0f)),
+  STICK_3("models/props/stick_03.obj", true, -1, Part("sticks", Layer.SOLID, "sticks", 0f)),
+  GRASS_1("models/foliage/grass_01.obj", true, -1, Part("card", Layer.CUTOUT, "grass_01", 0.05f)),
+  GRASS_2("models/foliage/grass_02.obj", true, -1, Part("card", Layer.CUTOUT, "grass_02", 0.06f)),
+  GRASS_3("models/foliage/grass_03.obj", true, -1, Part("card", Layer.CUTOUT, "grass_03", 0.06f)),
+  FERN("models/foliage/fern_01.obj", true, -1, Part("card", Layer.CUTOUT, "fern", 0.04f)),
+  DANDELION("models/foliage/dandelion_01.obj", true, -1, Part("card", Layer.CUTOUT, "dandelion", 0.05f)),
+  WEED("models/foliage/weed_01.obj", true, -1, Part("card", Layer.CUTOUT, "weed", 0.01f));
 
   /** Level-of-detail stand-ins are never placed by the scatter, only substituted when meshing far chunks. */
   val isLod: Boolean get() = name.endsWith("_LOD")
 
-  /** The [TREE_LOD] / [ROCK_LOD] stand-in of this kind, or the kind itself when it has none. */
-  val lodStandIn: Kind get() = when (this) { TREE -> TREE_LOD; ROCK -> ROCK_LOD; else -> this }
+  /** A pine (full detail, not a stand-in): can be chopped down. */
+  val isTree: Boolean get() = pine >= 0 && !isLod
+
+  /** The low-triangle stand-in of this kind, or the kind itself when it has none. */
+  val lodStandIn: Kind get() = when (this) {
+    PINE_1 -> PINE_1_LOD; PINE_2 -> PINE_2_LOD; PINE_3 -> PINE_3_LOD; ROCK -> ROCK_LOD; else -> this
+  }
 
   companion object {
     val ALL: Array<Kind> = values()
+    val PINES = arrayOf(PINE_1, PINE_2, PINE_3)
   }
 }
 
 /** One placed object: [y] is the ground height at ([x], [z]); [yaw] in radians. */
-class Placement(val kind: Kind, val x: Float, val y: Float, val z: Float, val yaw: Float, val scale: Float)
+class Placement(val kind: Kind, val x: Float, val y: Float, val z: Float, val yaw: Float, val scale: Float) {
+  /** Chopped down: only the stump is left (see [WorldPopulator.fell]). */
+  var felled: Boolean = false
+
+  /** Stable identity of a tree (its position quantised to 1/16 m), shared by every rebuild of its chunk. */
+  val id: Long get() = (Math.round(x * 16f).toLong() shl 32) or (Math.round(z * 16f).toLong() and 0xFFFFFFFFL)
+}
 
 /** A circular area kept free of trees, rocks, shrubs and litter (e.g. around the spawn point). */
 class Clearing(val x: Float, val z: Float, val radius: Float)
@@ -75,15 +91,19 @@ object WorldScatter {
     val z0 = chunkZ * chunkSize
     val b = biome.get()!!
 
-    // Trees: dense forest zones, gentle ground only
-    cells(x0, z0, chunkSize, 7.5f, 1) { x, z, r ->
+    // Pines: a dense forest inland (the forest biome covers most of the interior, its own noise
+    // leaves natural clearings); towards the coast it thins out and winding trails stay free
+    cells(x0, z0, chunkSize, TREE_CELL, 1) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
-      val forest = b[0]; val h = b[2]
-      if (h < 3.5f || forest < 0.45f) return@cells
-      val p = ((forest - 0.30f) * 1.5f).coerceIn(0f, 0.85f)
+      val forest = b[0]; val h = b[2]; val slope = b[3]
+      if (h < 3.5f || forest < 0.40f || slope > 0.65f) return@cells
+      if (onTrail(x, z, h)) return@cells
+      val p = (smooth((forest - 0.40f) / 0.35f) * 0.92f).coerceIn(0f, 0.92f)
       if (r.next() > p) return@cells
-      out.add(Placement(Kind.TREE, x, h, z, r.next() * TWO_PI, 0.85f + 0.5f * r.next()))
+      val variant = Kind.PINES[(r.next() * 3f).toInt().coerceAtMost(2)]
+      val scale = PineTreeGenerator.MIN_SCALE + (PineTreeGenerator.MAX_SCALE - PineTreeGenerator.MIN_SCALE) * r.next()
+      out.add(Placement(variant, x, h, z, r.next() * TWO_PI, scale))
     }
 
     // Shrubs: dry bushes in and around the forest, also on rocky dry ground
@@ -189,6 +209,32 @@ object WorldScatter {
   }
 
   // --- helpers -------------------------------------------------------------------------------
+
+  /** Grid spacing of the pine seeding (metres): up to ~10 trees per 16 m chunk in the thick of the forest. */
+  const val TREE_CELL = 5.2f
+
+  /**
+   * Winding footpaths through the coastal woods: the 0.5 iso-line of a smooth noise field, ~4 m wide,
+   * only below [TRAIL_MAX_HEIGHT] (inland the forest closes up).
+   */
+  fun onTrail(x: Float, z: Float, height: Float): Boolean {
+    if (height > TRAIL_MAX_HEIGHT) return false
+    val n = smoothNoise(x / 68f + 13.7f, z / 68f - 5.1f) * 0.65f + smoothNoise(x / 31f - 2.9f, z / 31f + 8.3f) * 0.35f
+    val width = 0.030f * (1f - height / TRAIL_MAX_HEIGHT * 0.5f)
+    return kotlin.math.abs(n - 0.5f) < width
+  }
+
+  private const val TRAIL_MAX_HEIGHT = 16f
+
+  private fun smoothNoise(x: Float, z: Float): Float {
+    val x0 = floor(x).toInt(); val z0 = floor(z).toInt()
+    val fx = x - x0; val fz = z - z0
+    val u = fx * fx * (3f - 2f * fx); val v = fz * fz * (3f - 2f * fz)
+    fun h(ix: Int, iz: Int) = (mix(mix(ix * 0x27D4EB2D) + iz * 0x165667B1) ushr 8) / 16777216f
+    val a = h(x0, z0) + u * (h(x0 + 1, z0) - h(x0, z0))
+    val c = h(x0, z0 + 1) + u * (h(x0 + 1, z0 + 1) - h(x0, z0 + 1))
+    return a + v * (c - a)
+  }
 
   /** Tiny deterministic generator: a stream of floats in [0, 1) seeded by (cell, salt). */
   class Stream(private var state: Int) {

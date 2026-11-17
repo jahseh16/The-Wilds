@@ -9,21 +9,21 @@ import kotlin.math.sqrt
  * ecosystem of a chunk be drawn with just two draw calls (one per [Layer]) instead of one per object.
  */
 object AtlasLayout {
-  class Cell(val x: Int, val y: Int, val size: Int, val file: String)
+  /** [file] is an asset image; a null file means the cell is generated at start-up (see [AtlasBuilder]). */
+  class Cell(val x: Int, val y: Int, val size: Int, val file: String?)
 
   const val SIZE = 1024
 
-  /** Opaque things: tree bark, boulders, pebbles, sticks (512 px cells). */
+  /** Opaque things: boulders, pebbles, sticks (512 px cells). The pine bark has its own repeating texture ([Layer.BARK]). */
   val SOLID: Map<String, Cell> = mapOf(
-    "bark" to Cell(0, 0, 512, "models/trees/tree_01_bark_diff.jpg"),
     "rock" to Cell(512, 0, 512, "models/props/rock_boulder_01_diff.jpg"),
     "pebbles" to Cell(0, 512, 512, "models/props/pebbles_diff.jpg"),
     "sticks" to Cell(512, 512, 512, "models/props/sticks_diff.jpg")
   )
 
-  /** Alpha-tested leaves and foliage cards: the tree leaves in 512 px, the small cards in 256 px. */
+  /** Alpha-tested foliage: the procedural pine needles in 512 px, the small cards in 256 px. */
   val CUTOUT: Map<String, Cell> = mapOf(
-    "leaves" to Cell(0, 0, 512, "models/trees/tree_01_leaves_diff.png"),
+    "needles" to Cell(0, 0, 512, null),
     "fern" to Cell(512, 0, 256, "models/foliage/fern_01.png"),
     "shrub" to Cell(768, 0, 256, "models/foliage/shrub_01.png"),
     "grass_01" to Cell(512, 256, 256, "models/foliage/grass_01.png"),
@@ -33,7 +33,11 @@ object AtlasLayout {
     "weed" to Cell(512, 512, 256, "models/foliage/weed_01.png")
   )
 
-  fun cells(layer: Layer): Map<String, Cell> = if (layer == Layer.SOLID) SOLID else CUTOUT
+  fun cells(layer: Layer): Map<String, Cell> = when (layer) {
+    Layer.SOLID -> SOLID
+    Layer.CUTOUT -> CUTOUT
+    Layer.BARK -> emptyMap()
+  }
 }
 
 /** One material group of one model, ready to be instanced: atlas UVs, height fractions, triangle indices. */
@@ -43,24 +47,27 @@ class PartMesh(
   val vertexCount: Int,
   /** x, y, z, nx, ny, nz, u, v per vertex (u, v already in atlas space). */
   val data: FloatArray,
-  /** 0 at the base of the model, 1 at its top (drives the wind sway). */
+  /** 0 at the base of the model, 1 at its top. */
   val heightFraction: FloatArray,
-  val indices: IntArray
-)
+  val indices: IntArray,
+  /** Baked ambient occlusion per vertex (1 = fully open); null = 1 everywhere. */
+  val ao: FloatArray? = null,
+  /** 0..1 per vertex, times [wind] = sway amplitude; defaults to growing with the height (f^1.5). */
+  swayWeight: FloatArray? = null,
+  /** Removed from the world when the tree it belongs to is felled (pine trunk and crown). */
+  val fellable: Boolean = false
+) {
+  val swayWeight: FloatArray = swayWeight ?: FloatArray(vertexCount) { val f = heightFraction[it]; f * sqrt(f) }
+}
 
 /**
  * The CPU copy of every placeable model, split into [PartMesh]es with atlas-remapped UVs, plus the
- * numbers the collision needs. [read] returns the text of an asset path, so the same code loads from
- * the Android assets in the game and from plain files in tests.
+ * numbers the collision needs. OBJ kinds are read with [read] (the Android assets in the game, plain
+ * files in tests); pine kinds come from [PineTreeGenerator].
  */
 class ScatterModels(read: (String) -> String) {
 
   private val parts = HashMap<Kind, List<PartMesh>>()
-
-  /** Where the tree trunk meets the ground, relative to the model origin, and its radius there (metres, unscaled). */
-  val trunkCenterX: Float
-  val trunkCenterZ: Float
-  val trunkRadius: Float
 
   /** Boulder footprint radius and height (metres, unscaled). */
   val rockRadius: Float
@@ -71,31 +78,26 @@ class ScatterModels(read: (String) -> String) {
 
   init {
     for (kind in Kind.ALL) {
-      val model = ObjModel.parse(read(kind.file))
-      triangleCounts[kind] = model.triangleCount
-      parts[kind] = kind.parts.map { buildPart(model, it) }
-    }
-    val tree = ObjModel.parse(read(Kind.TREE.file))
-    var sx = 0f; var sz = 0f; var n = 0
-    for (i in 0 until tree.vertexCount) {
-      if (tree.positions[i * 3 + 1] - tree.minY < TRUNK_BASE_HEIGHT) { sx += tree.positions[i * 3]; sz += tree.positions[i * 3 + 2]; n++ }
-    }
-    trunkCenterX = if (n > 0) sx / n else 0f
-    trunkCenterZ = if (n > 0) sz / n else 0f
-    var r2 = 0f
-    for (i in 0 until tree.vertexCount) {
-      if (tree.positions[i * 3 + 1] - tree.minY < TRUNK_BASE_HEIGHT) {
-        val dx = tree.positions[i * 3] - trunkCenterX; val dz = tree.positions[i * 3 + 2] - trunkCenterZ
-        if (dx * dx + dz * dz > r2) r2 = dx * dx + dz * dz
+      val file = kind.file
+      if (file == null) {
+        val p = PineTreeGenerator.parts(kind.pine, kind.isLod).values.toList()
+        parts[kind] = p
+        triangleCounts[kind] = p.sumOf { it.indices.size / 3 }
+      } else {
+        val model = ObjModel.parse(read(file))
+        triangleCounts[kind] = model.triangleCount
+        parts[kind] = kind.parts.map { buildPart(model, it) }
       }
     }
-    trunkRadius = sqrt(r2)
-    val rock = ObjModel.parse(read(Kind.ROCK.file))
+    val rock = ObjModel.parse(read(Kind.ROCK.file!!))
     rockRadius = 0.25f * ((rock.maxX - rock.minX) + (rock.maxZ - rock.minZ)) * 0.9f
     rockHeight = rock.height
   }
 
   fun partsOf(kind: Kind): List<PartMesh> = parts.getValue(kind)
+
+  /** Shape of the pine a tree kind (or its LOD) is built from. */
+  fun pineSpec(kind: Kind): PineSpec = PineTreeGenerator.SPECS[kind.pine]
 
   private fun buildPart(model: ObjModel, part: Part): PartMesh {
     val tris = model.groups[part.group] ?: error("model has no group '${part.group}'")
@@ -121,10 +123,6 @@ class ScatterModels(read: (String) -> String) {
     }
     return PartMesh(part.layer, part.wind, used.size, data, frac, idx)
   }
-
-  private companion object {
-    const val TRUNK_BASE_HEIGHT = 0.4f
-  }
 }
 
 /** Merged geometry of one layer of one chunk. */
@@ -134,14 +132,27 @@ class LayerData(
   val minX: Float, val minY: Float, val minZ: Float, val maxX: Float, val maxY: Float, val maxZ: Float
 )
 
+/** The vertices of one fellable part of one placement inside a merged [LayerData]. */
+class TreeRange(val placementIndex: Int, val layer: Layer, val firstVertex: Int, val vertexCount: Int)
+
+/** Result of [ChunkScatterMesh.build]: one merged mesh per layer and where each tree's fellable parts are. */
+class ScatterBuild(val layers: Map<Layer, LayerData?>, val treeRanges: List<TreeRange>) {
+  val solid: LayerData? get() = layers[Layer.SOLID]
+  val cutout: LayerData? get() = layers[Layer.CUTOUT]
+  val bark: LayerData? get() = layers[Layer.BARK]
+  val triangleCount: Int get() = layers.values.sumOf { (it?.indexCount ?: 0) / 3 }
+  val vertexCount: Int get() = layers.values.sumOf { it?.vertexCount ?: 0 }
+}
+
 /**
  * Merges many placements into one vertex/index array per [Layer] (static batching), so a chunk's
- * entire ecosystem costs two draw calls. Vertex layout: position(3) normal(3) uv(2) sway(1) near(1).
- * [sway] is the wind amplitude in metres at that vertex (the shader multiplies it by a travelling
- * wave); [near] is 1 for the small ground cover that fades out with distance.
+ * entire ecosystem costs at most three draw calls. Vertex layout: position(3) normal(3) uv(2) sway(1)
+ * near(1) ao(1). [sway] is the wind amplitude in metres at that vertex (the shader multiplies it by a
+ * travelling wave); [near] is 1 for the small ground cover that fades out with distance; [ao] the
+ * baked ambient occlusion (crown interiors).
  */
 object ChunkScatterMesh {
-  const val FLOATS = 10
+  const val FLOATS = 11
   const val MAX_VERTICES = 60000
 
   private class Builder {
@@ -156,17 +167,30 @@ object ChunkScatterMesh {
     fun finish(): LayerData? = if (ic == 0) null else LayerData(v, vc, i, ic, x0, y0, z0, x1, y1, z1)
   }
 
-  /** [lod] swaps trees and boulders for their low-triangle stand-ins (chunks far from the player). */
-  fun build(placements: List<Placement>, models: ScatterModels, lod: Boolean = false): Pair<LayerData?, LayerData?> {
-    val solid = Builder(); val cutout = Builder()
-    for (p in placements) {
+  /**
+   * [lod] swaps trees and boulders for their low-triangle stand-ins (chunks far from the player).
+   * Felled placements keep only their non-fellable parts (the stump). [fellableOnly] builds just the
+   * trunk + crown (the falling tree), [wind] = false freezes the sway.
+   */
+  fun build(
+    placements: List<Placement>, models: ScatterModels, lod: Boolean = false,
+    fellableOnly: Boolean = false, wind: Boolean = true
+  ): ScatterBuild {
+    val builders = Layer.values().associateWith { Builder() }
+    val ranges = ArrayList<TreeRange>()
+    for ((pi, p) in placements.withIndex()) {
       val cy = cos(p.yaw); val sy = sin(p.yaw)
       for (part in models.partsOf(if (lod) p.kind.lodStandIn else p.kind)) {
-        val b = if (part.layer == Layer.SOLID) solid else cutout
+        if (part.fellable && p.felled) continue
+        if (fellableOnly && !part.fellable) continue
+        val b = builders.getValue(part.layer)
         if (b.vc + part.vertexCount > MAX_VERTICES) continue
         b.ensure(part.vertexCount, part.indices.size)
         val base = b.vc
+        if (part.fellable) ranges.add(TreeRange(pi, part.layer, base, part.vertexCount))
         val sink = if (p.kind == Kind.ROCK) 0.12f * models.rockHeight * p.scale else 0f
+        val near = if (p.kind.near) 1f else 0f
+        val windScale = if (wind) part.wind * p.scale else 0f
         for (k in 0 until part.vertexCount) {
           val o = k * 8
           val lx = part.data[o] * p.scale; val ly = part.data[o + 1] * p.scale; val lz = part.data[o + 2] * p.scale
@@ -178,9 +202,9 @@ object ChunkScatterMesh {
           b.v[w] = wx; b.v[w + 1] = wy; b.v[w + 2] = wz
           b.v[w + 3] = cy * nx + sy * nz; b.v[w + 4] = ny; b.v[w + 5] = -sy * nx + cy * nz
           b.v[w + 6] = part.data[o + 6]; b.v[w + 7] = part.data[o + 7]
-          val f = part.heightFraction[k]
-          b.v[w + 8] = part.wind * p.scale * f * sqrt(f)
-          b.v[w + 9] = if (p.kind.near) 1f else 0f
+          b.v[w + 8] = windScale * part.swayWeight[k]
+          b.v[w + 9] = near
+          b.v[w + 10] = part.ao?.get(k) ?: 1f
           if (wx < b.x0) b.x0 = wx; if (wx > b.x1) b.x1 = wx
           if (wy < b.y0) b.y0 = wy; if (wy > b.y1) b.y1 = wy
           if (wz < b.z0) b.z0 = wz; if (wz > b.z1) b.z1 = wz
@@ -189,6 +213,24 @@ object ChunkScatterMesh {
         for (k in part.indices.indices) b.i[b.ic++] = (base + part.indices[k]).toShort()
       }
     }
-    return Pair(solid.finish(), cutout.finish())
+    return ScatterBuild(builders.mapValues { it.value.finish() }, ranges)
+  }
+
+  /** Same layout for a single loose part (a log): local coordinates, no wind. */
+  fun single(part: PartMesh): LayerData {
+    val b = Builder()
+    b.ensure(part.vertexCount, part.indices.size)
+    for (k in 0 until part.vertexCount) {
+      val o = k * 8; val w = k * FLOATS
+      for (c in 0 until 8) b.v[w + c] = part.data[o + c]
+      b.v[w + 8] = 0f; b.v[w + 9] = 0f; b.v[w + 10] = part.ao?.get(k) ?: 1f
+      val x = part.data[o]; val y = part.data[o + 1]; val z = part.data[o + 2]
+      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x
+      if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y
+      if (z < b.z0) b.z0 = z; if (z > b.z1) b.z1 = z
+    }
+    b.vc = part.vertexCount
+    for (k in part.indices.indices) b.i[b.ic++] = part.indices[k].toShort()
+    return b.finish()!!
   }
 }

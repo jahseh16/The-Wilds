@@ -56,10 +56,13 @@ class WorldScatterTest {
       kinds.merge(p.kind, 1, Int::plus)
       terrain.biomeAt(p.x, p.z, b)
       when (p.kind) {
-        Kind.TREE -> {
-          assertTrue("tree scale ${p.scale}", p.scale in 0.85f..1.35f)
-          assertTrue("tree in forest ${b[0]}", b[0] >= 0.45f)
-          assertTrue("tree on gentle ground ${b[3]}", b[3] < 0.75f)
+        Kind.PINE_1, Kind.PINE_2, Kind.PINE_3 -> {
+          assertTrue("pine scale ${p.scale}", p.scale in PineTreeGenerator.MIN_SCALE..PineTreeGenerator.MAX_SCALE)
+          val h = PineTreeGenerator.SPECS[p.kind.pine].height * p.scale
+          assertTrue("pine height $h", h in 8f..14f)
+          assertTrue("pine in forest ${b[0]}", b[0] >= 0.40f)
+          assertTrue("pine on gentle ground ${b[3]}", b[3] < 0.65f)
+          assertTrue("pine not on a trail", !WorldScatter.onTrail(p.x, p.z, p.y))
         }
         Kind.ROCK -> assertTrue("boulder height ${p.y}", p.y > 0.8f)
         Kind.PEBBLE_1, Kind.PEBBLE_2, Kind.PEBBLE_3, Kind.PEBBLE_PATCH -> assertTrue("pebbles on the shore, h=${p.y}", p.y < 3.3f)
@@ -69,9 +72,9 @@ class WorldScatterTest {
       }
     }
     for (k in Kind.ALL.filter { !it.isLod }) assertTrue("kind $k was placed at least once: $kinds", (kinds[k] ?: 0) > 0)
-    // Forest chunks hold a handful of trees, not hundreds (triangle budget)
-    val densest = chunks.maxOf { (cx, cz) -> far(cx, cz).count { it.kind == Kind.TREE } }
-    assertTrue("densest chunk has $densest trees", densest in 1..8)
+    // Dense forest, but bounded per chunk (triangle budget)
+    val densest = chunks.maxOf { (cx, cz) -> far(cx, cz).count { it.kind.isTree } }
+    assertTrue("densest chunk has $densest pines", densest in 6..14)
   }
 
   @Test

@@ -10,11 +10,13 @@ class VisualSettingsTest {
   @Test
   fun defaultsMatchTheSpecification() {
     val s = VisualSettings()
-    assertEquals(1.00f, s.brightness, 0f)
-    assertEquals(1.10f, s.contrast, 0f)
-    assertEquals(0.95f, s.saturation, 0f)
+    assertEquals(0.94f, s.brightness, 0f)
+    assertEquals(1.22f, s.contrast, 0f)
+    assertEquals(0.88f, s.saturation, 0f)
     assertEquals(1.00f, s.sunIntensity, 0f)
-    assertEquals(0.00f, s.warmth, 0f)
+    assertEquals(1.25f, s.terrainContrast, 0f)
+    assertEquals(1.35f, s.normalStrength, 0f)
+    assertEquals(-0.06f, s.warmth, 0f)
     assertEquals(1.00f, s.flashlightIntensity, 0f)
     assertTrue(s.isDefault())
   }
@@ -44,7 +46,7 @@ class VisualSettingsTest {
     s[VisualParam.BRIGHTNESS] = -3f
     assertEquals(0.50f, s.brightness, 0f)
     s[VisualParam.WARMTH] = Float.NaN
-    assertEquals(0f, s.warmth, 0f)
+    assertEquals(VisualParam.WARMTH.default, s.warmth, 0f)
   }
 
   @Test
@@ -53,7 +55,7 @@ class VisualSettingsTest {
     for ((i, p) in VisualParam.values().withIndex()) a[p] = p.min + (p.max - p.min) * (i + 1) / 10f
     val store = HashMap<String, Float>()
     a.save { k, v -> store[k] = v }
-    assertEquals(VisualParam.values().size, store.size)
+    assertEquals(VisualParam.values().size + 1, store.size) // + the version key
 
     val b = VisualSettings()
     b.load { k, d -> store[k] ?: d }
@@ -65,10 +67,20 @@ class VisualSettingsTest {
     val s = VisualSettings()
     s.load { _, d -> d }
     assertTrue(s.isDefault())
-    s.load { _, _ -> 1e9f }
+    s.load { k, _ -> if (k.endsWith(VisualSettings.VERSION_KEY)) VisualSettings.PREFS_VERSION else 1e9f }
     for (p in VisualParam.values()) assertEquals(p.max, s[p], 0f)
-    s.load { _, _ -> Float.NaN }
+    s.load { k, _ -> if (k.endsWith(VisualSettings.VERSION_KEY)) VisualSettings.PREFS_VERSION else Float.NaN }
     assertTrue(s.isDefault())
+  }
+
+  @Test
+  fun valuesSavedWithTheOldDefaultsAreDropped() {
+    // Prefs written before the version key existed: back to the new high-contrast look
+    val old = mapOf(VisualSettings.PREF_PREFIX + "contrast" to 1.10f, VisualSettings.PREF_PREFIX + "brightness" to 1.0f)
+    val s = VisualSettings()
+    s.load { k, d -> old[k] ?: d }
+    assertTrue(s.isDefault())
+    assertEquals(1.22f, s.contrast, 0f)
   }
 
   @Test
@@ -101,6 +113,8 @@ class VisualSettingsTest {
     val s = VisualSettings()
     s[VisualParam.CONTRAST] = 1f
     s[VisualParam.SATURATION] = 1f
+    s[VisualParam.BRIGHTNESS] = 1f
+    s[VisualParam.WARMTH] = 0f
     val out = FloatArray(3)
     s.grade(0.4f, 0.5f, 0.6f, out)
     assertEquals(0.4f, out[0], 1e-5f)

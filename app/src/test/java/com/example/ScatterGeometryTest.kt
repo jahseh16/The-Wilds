@@ -24,7 +24,7 @@ class ScatterGeometryTest {
 
   @Test
   fun everyKindHasItsPartsAndUvsLandInsideTheirAtlasCell() {
-    for (kind in Kind.ALL) {
+    for (kind in Kind.ALL.filter { it.file != null }) {
       val parts = models.partsOf(kind)
       assertEquals(kind.parts.size, parts.size)
       for ((part, spec) in parts.zip(kind.parts)) {
@@ -42,26 +42,28 @@ class ScatterGeometryTest {
 
   @Test
   fun colliderNumbersAreSane() {
-    assertTrue("trunk radius ${models.trunkRadius}", models.trunkRadius in 0.2f..1.2f)
+    for (k in Kind.PINES) assertTrue("trunk radius ${models.pineSpec(k).baseRadius}", models.pineSpec(k).baseRadius in 0.2f..0.5f)
     assertTrue("rock radius ${models.rockRadius}", models.rockRadius in 0.5f..1.5f)
     assertTrue("rock height ${models.rockHeight}", models.rockHeight in 0.5f..1.5f)
   }
 
   @Test
-  fun aFullForestChunkIsTwoMeshesWithinTheVertexAndTriangleBudget() {
+  fun aFullForestChunkIsThreeMeshesWithinTheVertexAndTriangleBudget() {
     val terrain = IslandTerrain(IslandTerrain.DEFAULT_SEED, 512f, 512f, 500f, 0f)
     var worstTris = 0; var worstVerts = 0; var forestChunks = 0
     for (cz in 20..44 step 2) for (cx in 20..44 step 2) {
       val list = ArrayList<Placement>()
       WorldScatter.planFar(terrain, cx, cz, 16f, emptyList(), list)
       WorldScatter.planNear(terrain, cx, cz, 16f, emptyList(), list)
-      if (list.none { it.kind == Kind.TREE }) continue
+      if (list.none { it.kind.isTree }) continue
       forestChunks++
-      val (solid, cutout) = ChunkScatterMesh.build(list, models)
-      val verts = (solid?.vertexCount ?: 0) + (cutout?.vertexCount ?: 0)
-      val tris = ((solid?.indexCount ?: 0) + (cutout?.indexCount ?: 0)) / 3
+      val built = ChunkScatterMesh.build(list, models)
+      val verts = built.vertexCount
+      val tris = built.triangleCount
       worstTris = maxOf(worstTris, tris); worstVerts = maxOf(worstVerts, verts)
-      for (layer in listOfNotNull(solid, cutout)) {
+      val cutout = built.cutout
+      assertNotNull("pines have bark", built.bark)
+      for (layer in built.layers.values.filterNotNull()) {
         assertTrue("layer vertices ${layer.vertexCount}", layer.vertexCount < ChunkScatterMesh.MAX_VERTICES)
         assertTrue(layer.minX <= layer.maxX && layer.minY <= layer.maxY)
         for (k in 0 until layer.indexCount) assertTrue(layer.indices[k].toInt() and 0xFFFF < layer.vertexCount)
@@ -76,16 +78,56 @@ class ScatterGeometryTest {
   @Test
   fun windAmplitudeIsZeroAtTheBaseAndGrowsTowardsTheTips() {
     val list = listOf(Placement(Kind.GRASS_3, 10f, 5f, 10f, 0f, 1f))
-    val (_, cutout) = ChunkScatterMesh.build(list, models)
-    val layer = cutout!!
+    val layer = ChunkScatterMesh.build(list, models).cutout!!
     var lowSway = 0f; var highSway = 0f
     for (k in 0 until layer.vertexCount) {
       val y = layer.vertices[k * ChunkScatterMesh.FLOATS + 1] - 5f
       val sway = layer.vertices[k * ChunkScatterMesh.FLOATS + 8]
       if (y < 0.01f) lowSway = maxOf(lowSway, sway) else highSway = maxOf(highSway, sway)
       assertEquals(1f, layer.vertices[k * ChunkScatterMesh.FLOATS + 9], 0f) // grass fades with distance
+      assertEquals(1f, layer.vertices[k * ChunkScatterMesh.FLOATS + 10], 0f) // no baked occlusion on OBJ cards
     }
     assertEquals(0f, lowSway, 1e-6f)
     assertTrue(highSway > 0.02f)
+  }
+
+  @Test
+  fun aFelledPineKeepsOnlyItsStumpAndRangesCoverTheFellableParts() {
+    val pine = Placement(Kind.PINE_2, 100f, 6f, 100f, 0.7f, 1f)
+    val grass = Placement(Kind.GRASS_1, 101f, 6f, 101f, 0f, 1f)
+    val full = ChunkScatterMesh.build(listOf(pine, grass), models)
+    val ranges = full.treeRanges
+    assertEquals("trunk + crown ranges", 2, ranges.size)
+    assertTrue(ranges.all { it.placementIndex == 0 })
+    val crownRange = ranges.first { it.layer == Layer.CUTOUT }
+    val trunkRange = ranges.first { it.layer == Layer.BARK }
+    assertEquals(0, crownRange.firstVertex)
+    // the stump comes first in the bark mesh, the trunk after it
+    assertTrue(trunkRange.firstVertex > 0)
+    assertEquals(full.bark!!.vertexCount, trunkRange.firstVertex + trunkRange.vertexCount)
+
+    pine.felled = true
+    val felled = ChunkScatterMesh.build(listOf(pine, grass), models)
+    assertTrue(felled.treeRanges.isEmpty())
+    assertEquals("only the stump's bark is left", trunkRange.firstVertex, felled.bark!!.vertexCount)
+    // the grass card is still there
+    assertTrue(felled.cutout!!.vertexCount < full.cutout!!.vertexCount && felled.cutout!!.vertexCount > 0)
+    // the stump reaches below the ground (never floats on a slope) and stops at the cut
+    var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+    for (k in 0 until felled.bark!!.vertexCount) {
+      val y = felled.bark!!.vertices[k * ChunkScatterMesh.FLOATS + 1]
+      minY = minOf(minY, y); maxY = maxOf(maxY, y)
+    }
+    assertEquals(6f - PineTreeGenerator.STUMP_BURY, minY, 1e-4f)
+    assertEquals(6f + PineTreeGenerator.STUMP_TOP, maxY, 1e-4f)
+  }
+
+  @Test
+  fun fellableOnlyBuildsTheFallingTreeWithoutWind() {
+    val built = ChunkScatterMesh.build(listOf(Placement(Kind.PINE_1, 0f, 0f, 0f, 0f, 1f)), models, fellableOnly = true, wind = false)
+    for (layer in built.layers.values.filterNotNull()) for (k in 0 until layer.vertexCount) {
+      assertEquals(0f, layer.vertices[k * ChunkScatterMesh.FLOATS + 8], 0f)
+      assertTrue("no stump below the cut", layer.vertices[k * ChunkScatterMesh.FLOATS + 1] >= PineTreeGenerator.STUMP_TOP - 1e-4f)
+    }
   }
 }

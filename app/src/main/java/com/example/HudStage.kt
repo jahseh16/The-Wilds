@@ -143,6 +143,9 @@ class HudStage(
   private val lightButtonStyle: TextButton.TextButtonStyle
   private val phaseButton: TextButton
   private val gearButton: TextButton
+  private val woodLabel: com.badlogic.gdx.scenes.scene2d.ui.Label
+  private var shownActionLabel = "CAVAR"
+  private var shownWood = -1
   private val visualPanel: VisualPanel
   private var shownPhaseLabel: String = ""
 
@@ -421,6 +424,29 @@ class HudStage(
       add(visualPanel)
     }
     addActor(panelTable)
+
+    // Wood counter (top-left), only shown once the player has some
+    woodLabel = com.badlogic.gdx.scenes.scene2d.ui.Label("", com.badlogic.gdx.scenes.scene2d.ui.Label.LabelStyle(phaseFont, Color(0.95f, 0.88f, 0.72f, 0.95f)))
+    val woodTable = Table().apply {
+      setFillParent(true)
+      top().left()
+      pad(20f, 24f, 0f, 0f)
+      add(woodLabel)
+    }
+    addActor(woodTable)
+  }
+
+  /** The action button says what it will do: CAVAR (dig), TALAR (chop the aimed pine), RECOGER (pick up a log). */
+  fun setActionLabel(label: String) {
+    if (label == shownActionLabel) return
+    shownActionLabel = label
+    digButton.setText(label)
+  }
+
+  fun setWoodCount(count: Int) {
+    if (count == shownWood) return
+    shownWood = count
+    woodLabel.setText(if (count > 0) "Madera: $count" else "")
   }
 
   val isVisualPanelOpen: Boolean

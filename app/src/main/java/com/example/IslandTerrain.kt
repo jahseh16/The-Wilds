@@ -169,7 +169,12 @@ class IslandTerrain(
 
     val heightBand = smoothstep(((above - 4f) / 3f).coerceIn(0f, 1f)) * (1f - smoothstep(((above - 26f) / 8f).coerceIn(0f, 1f)))
     val gentle = 1f - smoothstep(((slope - 0.36f) / 0.34f).coerceIn(0f, 1f))
-    val patch = smoothstep((((0.5f + 0.5f * fbm(x * 0.011f * freqScale + 55.5f, z * 0.011f * freqScale - 17.7f, 3, 9)) - 0.36f) / 0.14f).coerceIn(0f, 1f))
+    // Forest patches: scattered woods near the coast, closing into a dense forest inland (the
+    // noise still leaves natural clearings and meadows there)
+    val dist = sqrt((x - centerX) * (x - centerX) + (z - centerZ) * (z - centerZ))
+    val interior = 1f - smoothstep(((dist / shoreRadius - 0.40f) / 0.40f).coerceIn(0f, 1f))
+    val patchLow = 0.36f - 0.17f * interior
+    val patch = smoothstep((((0.5f + 0.5f * fbm(x * 0.011f * freqScale + 55.5f, z * 0.011f * freqScale - 17.7f, 3, 9)) - patchLow) / 0.14f).coerceIn(0f, 1f))
     out[0] = heightBand * gentle * patch * (1f - rz) * (1f - gully)
 
     // Shingle: a strip just above the waterline (mostly on cliff coasts), rocky zones, gullies, steep scree

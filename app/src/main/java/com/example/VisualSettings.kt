@@ -13,13 +13,14 @@ enum class VisualParam(
   /** Slider granularity (also the number of decimals shown: 0.01 -> 2). */
   val step: Float = 0.01f
 ) {
-  BRIGHTNESS("brightness", "Brillo / Exposicion", 0.50f, 1.60f, 1.00f),
-  CONTRAST("contrast", "Contraste general", 0.70f, 1.60f, 1.10f),
-  SATURATION("saturation", "Saturacion", 0.30f, 1.50f, 0.95f),
+  // Defaults: dense, sombre, high-contrast look (The Forest style)
+  BRIGHTNESS("brightness", "Brillo / Exposicion", 0.50f, 1.60f, 0.94f),
+  CONTRAST("contrast", "Contraste general", 0.70f, 1.60f, 1.22f),
+  SATURATION("saturation", "Saturacion", 0.30f, 1.50f, 0.88f),
   SUN_INTENSITY("sun_intensity", "Luz solar / ambiental", 0.50f, 1.80f, 1.00f),
-  TERRAIN_CONTRAST("terrain_contrast", "Contraste del suelo", 0.60f, 1.80f, 1.00f),
-  NORMAL_STRENGTH("normal_strength", "Relieve del suelo", 0.50f, 2.20f, 1.00f),
-  WARMTH("warmth", "Temperatura (frio / calido)", -0.30f, 0.30f, 0.00f),
+  TERRAIN_CONTRAST("terrain_contrast", "Contraste del suelo", 0.60f, 1.80f, 1.25f),
+  NORMAL_STRENGTH("normal_strength", "Relieve del suelo", 0.50f, 2.20f, 1.35f),
+  WARMTH("warmth", "Temperatura (frio / calido)", -0.30f, 0.30f, -0.06f),
   FLASHLIGHT_INTENSITY("flashlight_intensity", "Potencia de linterna", 0.50f, 2.00f, 1.00f),
   FLASHLIGHT_SOFTNESS("flashlight_softness", "Suavizado del haz", 0.00f, 1.00f, 0.50f);
 
@@ -74,12 +75,19 @@ class VisualSettings {
     for (p in VisualParam.values()) this[p] = p.default
   }
 
-  /** Reads every parameter with [read] (key, default) -> value; missing or invalid values fall back to the default. */
+  /**
+   * Reads every parameter with [read] (key, default) -> value; missing or invalid values fall back to
+   * the default. Values saved under an older [PREFS_VERSION] (other defaults) are ignored, so a new
+   * default look reaches players who never touched the panel... and those who did start over once.
+   */
   fun load(read: (key: String, default: Float) -> Float) {
+    val version = read(PREF_PREFIX + VERSION_KEY, 0f)
+    if (version < PREFS_VERSION) { resetToDefaults(); return }
     for (p in VisualParam.values()) this[p] = p.clamp(read(PREF_PREFIX + p.key, p.default))
   }
 
   fun save(write: (key: String, value: Float) -> Unit) {
+    write(PREF_PREFIX + VERSION_KEY, PREFS_VERSION)
     for (p in VisualParam.values()) write(PREF_PREFIX + p.key, this[p])
   }
 
@@ -106,6 +114,9 @@ class VisualSettings {
   companion object {
     const val PREFS_NAME = "the_wilds_visual_prefs"
     const val PREF_PREFIX = "visual_"
+    const val VERSION_KEY = "version"
+    /** Bumped when the defaults change (2 = high-contrast The Forest look). */
+    const val PREFS_VERSION = 2f
 
     /** Mid-dark pivot: contrast deepens shadows without crushing the (already dark) night scenes. */
     const val GRADE_PIVOT = 0.22f
