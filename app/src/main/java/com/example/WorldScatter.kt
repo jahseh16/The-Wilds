@@ -96,6 +96,7 @@ object WorldScatter {
     cells(x0, z0, chunkSize, TREE_CELL, 1) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val forest = b[0]; val h = b[2]; val slope = b[3]
       if (h < 3.5f || forest < 0.40f || slope > 0.65f) return@cells
       if (onTrail(x, z, h)) return@cells
@@ -110,8 +111,10 @@ object WorldScatter {
     cells(x0, z0, chunkSize, 4.5f, 2) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]; val slope = b[3]
       if (h < 3.0f || h > 30f || slope > 0.75f) return@cells
+      if (terrain.trailAt(x, z) > 0.3f || terrain.craterWallAt(x, z) > 0.1f) return@cells
       val p = 0.04f + 0.30f * b[0] + 0.12f * b[1]
       if (r.next() > p) return@cells
       out.add(Placement(Kind.SHRUB, x, h, z, r.next() * TWO_PI, 0.75f + 0.5f * r.next()))
@@ -121,8 +124,11 @@ object WorldScatter {
     cells(x0, z0, chunkSize, 13f, 3) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]; val slope = b[3]; val gravel = b[1]
       if (h < 0.8f) return@cells
+      // never block a trail or the sinkhole's ledge path
+      if (terrain.trailAt(x, z) > 0.1f || terrain.craterWallAt(x, z) > 0.05f) return@cells
       val steep = smooth((slope - 0.30f) / 0.40f) * 0.75f
       val rocky = max(0f, gravel - 0.45f) * 0.9f
       val shoreRock = if (h < 3.5f && gravel > 0.1f) 0.28f * gravel else 0f
@@ -141,6 +147,7 @@ object WorldScatter {
     cells(x0, z0, chunkSize, 26f, 4) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]; val slope = b[3]
       if (h < 0.35f || h > 2.8f || slope > 0.22f) return@cells
       if (r.next() > 0.5f) return@cells
@@ -151,6 +158,7 @@ object WorldScatter {
     cells(x0, z0, chunkSize, 5f, 5) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]; val slope = b[3]
       if (h < 0.15f || h > 3.2f || slope > 0.55f) return@cells
       if (r.next() > 0.30f + 0.35f * b[1]) return@cells
@@ -162,6 +170,7 @@ object WorldScatter {
     cells(x0, z0, chunkSize, 7f, 6) { x, z, r ->
       if (blocked(x, z, clearings)) return@cells
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]
       if (h < 3.5f || b[0] < 0.35f) return@cells
       if (r.next() > 0.15f + 0.55f * b[0]) return@cells
@@ -172,6 +181,7 @@ object WorldScatter {
     // Grass tufts: meadows mostly, sparse in the forest, none on sand, gravel or steep rock
     cells(x0, z0, chunkSize, 1.05f, 7) { x, z, r ->
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]; val slope = b[3]
       if (h < 3.2f || h > 26f || slope > 0.55f) return@cells
       val density = (0.78f * (1f - b[1] * 0.95f)) * (1f - 0.65f * b[0])
@@ -183,6 +193,7 @@ object WorldScatter {
     // Ferns under the canopy
     cells(x0, z0, chunkSize, 2.6f, 8) { x, z, r ->
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]
       if (h < 3.5f || b[0] < 0.25f) return@cells
       if (r.next() > 0.55f * b[0]) return@cells
@@ -192,15 +203,28 @@ object WorldScatter {
     // Ground-hugging weeds anywhere that is not sand
     cells(x0, z0, chunkSize, 3f, 9) { x, z, r ->
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]
       if (h < 2.8f || b[3] > 0.6f) return@cells
       if (r.next() > 0.32f) return@cells
       out.add(Placement(Kind.WEED, x, h, z, r.next() * TWO_PI, 1.5f + 1.0f * r.next()))
     }
 
+    // Lake shores: tall reed-like tufts and ferns crowding the banks (no trees there)
+    cells(x0, z0, chunkSize, 1.6f, 11) { x, z, r ->
+      val shore = terrain.lakeShoreAt(x, z)
+      if (shore < 0.25f) return@cells
+      terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
+      if (b[3] > 0.6f || r.next() > 0.70f * shore) return@cells
+      val kind = if (r.next() < 0.72f) Kind.GRASS_3 else Kind.FERN
+      out.add(Placement(kind, x, b[2], z, r.next() * TWO_PI, (if (kind == Kind.GRASS_3) 1.9f else 1.1f) + 0.8f * r.next()))
+    }
+
     // A few dandelions in the open
     cells(x0, z0, chunkSize, 3.3f, 10) { x, z, r ->
       terrain.biomeAt(x, z, b)
+      if (terrain.inLakeWater(x, z, b[2])) return@cells
       val h = b[2]
       if (h < 3.4f || b[0] > 0.4f || b[1] > 0.3f || b[3] > 0.45f) return@cells
       if (r.next() > 0.20f) return@cells

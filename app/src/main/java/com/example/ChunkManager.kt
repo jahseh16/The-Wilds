@@ -432,6 +432,9 @@ class ChunkManager(
   /** Height of the original, unedited terrain (what the sea floor and beaches looked like at the start). */
   fun baseTerrainHeightAt(x: Float, z: Float): Float = terrain.heightAt(x, z)
 
+  /** The undug terrain as the sea sees it (inland lake basins count as land, see [IslandTerrain.seaFloorAt]). */
+  fun seaFloorHeightAt(x: Float, z: Float): Float = terrain.seaFloorAt(x, z)
+
   // --- Meshing -------------------------------------------------------------------------------
 
   /**
@@ -788,14 +791,25 @@ class ChunkManager(
   }
 
   /**
-   * Picks a spawn on firm, open ground as close to the island centre as possible: walks outward in
-   * rings until it finds a flat, dry spot above the waterline and below the mountains that is not
-   * forest, rock outcrop, gravel or gully (the world populator keeps a [SPAWN_CLEARING_RADIUS] m
-   * clearing around it), then lets [findSpawnY] settle the height. If the whole island is too
-   * rugged for that, the second pass only asks for dry, gentle ground.
+   * Picks the spawn: the meadow the terrain lays out in the south-central forest
+   * ([IslandTerrain.spawnX], [IslandTerrain.spawnZ]: ~150 m from the south beach, next to a lake),
+   * nudged to the nearest flat, open, dry spot within [SPAWN_HINT_SEARCH] m. Only if that fails it
+   * falls back to walking outward from the map centre in rings (strict open ground first, then any
+   * dry gentle ground). The world populator keeps a [SPAWN_CLEARING_RADIUS] m clearing around it.
    * Writes the result (x, feet-clearance y, z) into [out].
    */
   fun findDrySpawn(out: Vector3): Vector3 {
+    var ring = 0f
+    while (ring <= SPAWN_HINT_SEARCH) {
+      val samples = if (ring == 0f) 1 else (ring * 0.5f).toInt().coerceAtLeast(8)
+      for (i in 0 until samples) {
+        val angle = (2.0 * PI * i / samples).toFloat()
+        val x = terrain.spawnX + cos(angle) * ring
+        val z = terrain.spawnZ + sin(angle) * ring
+        if (isSpawnGround(x, z, strict = true)) return out.set(x, findSpawnY(x, z), z)
+      }
+      ring += 2f
+    }
     for (strict in booleanArrayOf(true, false)) {
       var ring = 0f
       while (ring <= islandRadius) {
@@ -1007,9 +1021,10 @@ class ChunkManager(
     private const val SPAWN_SEARCH_STEP = 4f
 
     /** Radius of the clearing kept free of trees and rocks around the spawn point. */
-    const val SPAWN_CLEARING_RADIUS = 7f
+    const val SPAWN_CLEARING_RADIUS = 12f
+    private const val SPAWN_HINT_SEARCH = 40f
     private const val SPAWN_MIN_HEIGHT_ABOVE_SEA = 2.0f
-    private const val SPAWN_MAX_HEIGHT_ABOVE_SEA = 9.0f
+    private const val SPAWN_MAX_HEIGHT_ABOVE_SEA = 16.0f
     private const val SPAWN_SLOPE_PROBE = 2.5f
     private const val SPAWN_MAX_SLOPE_DELTA = 0.5f
 

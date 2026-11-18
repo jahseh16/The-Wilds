@@ -67,11 +67,19 @@ class WorldScatterTest {
         Kind.ROCK -> assertTrue("boulder height ${p.y}", p.y > 0.8f)
         Kind.PEBBLE_1, Kind.PEBBLE_2, Kind.PEBBLE_3, Kind.PEBBLE_PATCH -> assertTrue("pebbles on the shore, h=${p.y}", p.y < 3.3f)
         Kind.STICK_1, Kind.STICK_2, Kind.STICK_3 -> assertTrue("sticks under trees ${b[0]}", b[0] >= 0.35f)
-        Kind.GRASS_1, Kind.GRASS_2, Kind.GRASS_3 -> assertTrue("grass not on the beach h=${p.y}", p.y >= 3.2f)
+        Kind.GRASS_1, Kind.GRASS_2, Kind.GRASS_3 -> assertTrue("grass not on the beach h=${p.y}", p.y >= 3.2f || terrain.lakeShoreAt(p.x, p.z) > 0.2f)
         else -> Unit
       }
     }
-    for (k in Kind.ALL.filter { !it.isLod }) assertTrue("kind $k was placed at least once: $kinds", (kinds[k] ?: 0) > 0)
+    // rare kinds (beach pebble patches) may miss the sparse sample: then look at every chunk
+    val missing = Kind.ALL.filter { !it.isLod && (kinds[it] ?: 0) == 0 }.toMutableSet()
+    if (missing.isNotEmpty()) {
+      for (cx in 8..56) for (cz in 8..56) {
+        for (p in far(cx, cz) + near(cx, cz)) missing.remove(p.kind)
+        if (missing.isEmpty()) break
+      }
+    }
+    assertTrue("kinds never placed: $missing (sample: $kinds)", missing.isEmpty())
     // Dense forest, but bounded per chunk (triangle budget)
     val densest = chunks.maxOf { (cx, cz) -> far(cx, cz).count { it.kind.isTree } }
     assertTrue("densest chunk has $densest pines", densest in 6..14)

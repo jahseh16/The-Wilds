@@ -73,6 +73,10 @@ class WaterShader(
   /** Animation clock in seconds. The waves repeat every [TIME_WRAP] s, so wrap it there (seamless). */
   var time: Float = 0f
 
+  /** 0 = open sea (swell, surf), 1 = a still freshwater lake (ripples, a thin wet edge, darker peaty water). */
+  var calm: Float = 0f
+  private var uCalmLoc = -1
+
   /** Exponential-squared fog density in 1/metre (colour comes from the Environment's Fog attribute). */
   var fogDensity: Float = 0f
 
@@ -116,6 +120,7 @@ class WaterShader(
     uSpotLightCutoffLoc = program.getUniformLocation("u_spotLightCutoff")
     gradeLocs = VisualGrade.Locations(program, withSpot = true)
     glowLocs = SkyGlow.Locations(program)
+    uCalmLoc = program.getUniformLocation("u_calm")
   }
 
   override fun compareTo(other: Shader): Int = if (other === this) 0 else -1
@@ -143,6 +148,7 @@ class WaterShader(
     program.setUniformf(uSkyColorLoc, skyColor.r, skyColor.g, skyColor.b)
     gradeLocs.apply(program, visual)
     glowLocs.apply(program, sky)
+    program.setUniformf(uCalmLoc, calm)
   }
 
   override fun render(renderable: Renderable) {
@@ -273,6 +279,7 @@ uniform HP vec3 u_spotLightPos;
 uniform mediump vec3 u_spotLightDir;
 uniform mediump float u_spotLightIntensity;
 uniform mediump float u_spotLightCutoff;
+uniform mediump float u_calm;
 
 // Must match ShoreMap.DEPTH_RANGE
 const mediump float DEPTH_RANGE = ${ShoreMap.DEPTH_RANGE};
@@ -351,7 +358,7 @@ void main() {
 
     mediump float detail = 1.0 - smoothstep(15.0, 80.0, dist);
     mediump float flatten = 0.85 / (1.0 + dist * 0.025);
-    mediump vec2 slope = waveSlope(v_worldPos.xz, ph, detail) * flatten;
+    mediump vec2 slope = waveSlope(v_worldPos.xz, ph, detail) * flatten * (1.0 - 0.72 * u_calm);
     mediump vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
 
     mediump vec3 L = normalize(-u_dirLightDir);
@@ -364,6 +371,8 @@ void main() {
     // muted at dusk, almost black under the moon
     mediump vec3 deepColor = DEEP_COLOR + u_fogColor * 0.055;
     mediump vec3 waterColor = mix(SHALLOW_COLOR, deepColor, depthMix);
+    // Lakes: peaty, darker green-brown fresh water
+    waterColor = mix(waterColor, mix(vec3(0.14, 0.17, 0.11), vec3(0.02, 0.035, 0.03), depthMix), u_calm);
     mediump vec3 body = waterColor * lightScale;
 
     // Fresnel: looking straight down shows the body, grazing angles show the sky (fog colour)
@@ -396,7 +405,9 @@ void main() {
     mediump float breakup = valueNoise(v_worldPos.xz * 1.1 + vec2(ph * 40.0, -ph * 30.0));
     mediump float breakup2 = valueNoise(v_worldPos.xz * 3.7 - vec2(ph * 55.0, ph * 20.0));
     mediump float lacy = mix(breakup, breakup2, 0.4);
-    mediump float foam = clamp(band + crest, 0.0, 1.0) * smoothstep(0.22, 0.78, lacy + band * 0.30);
+    mediump float foam = clamp(band + crest * (1.0 - u_calm), 0.0, 1.0) * smoothstep(0.22, 0.78, lacy + band * 0.30);
+    // a lake has no surf, only a thin wet line along the bank
+    foam *= 1.0 - 0.80 * u_calm;
 
     col += u_dirLightColor * spec * (1.0 - foam);
     mediump vec3 foamLight = min(u_ambientColor + u_dirLightColor * 0.85, vec3(1.0));

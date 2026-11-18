@@ -45,6 +45,7 @@ class GameScreen : Screen {
   private val flashlight: SpotLight
   private val chunkManager: ChunkManager
   private val oceanRenderer: OceanRenderer
+  private val lakeRenderer: LakeRenderer
   private val skyRenderer = SkyRenderer()
   private val hudStage: HudStage
 
@@ -161,6 +162,8 @@ class GameScreen : Screen {
     // streaming radius fills in one chunk per frame from render()
     chunkManager.prewarm(spawn)
     oceanRenderer = OceanRenderer(chunkManager).apply { visual = this@GameScreen.visual; sky = skyRenderer.palette }
+    // Freshwater lakes at their own levels (the sinkhole lake and the chain of inland lakes)
+    lakeRenderer = LakeRenderer(chunkManager.terrain).apply { visual = this@GameScreen.visual; sky = skyRenderer.palette }
 
     flashlight = SpotLight().apply {
       set(
@@ -306,6 +309,7 @@ class GameScreen : Screen {
     applyBodyFeel(dt)
     soundManager.update(camera.position)
     oceanRenderer.update(dt, camera.position, dayNight.fogDensity, camera.far, dayNight.skyColor)
+    lakeRenderer.update(dt, dayNight.fogDensity, camera.far)
     updateFlashlight()
     updateAimAndExcavation(dt)
     updateShovelViewmodel(dt)
@@ -336,6 +340,7 @@ class GameScreen : Screen {
 
     modelBatch.begin(camera)
     oceanRenderer.render(modelBatch, environment)
+    lakeRenderer.render(modelBatch, environment, camera)
     modelBatch.end()
 
     // Clear only depth buffer so the 3D shovel viewmodel never clips into tunnel walls
@@ -808,6 +813,7 @@ class GameScreen : Screen {
     modelBatch.dispose()
     terrainShader.dispose()
     oceanRenderer.dispose()
+    lakeRenderer.dispose()
     skyRenderer.dispose()
     populator.dispose()
     foliageShader.dispose()

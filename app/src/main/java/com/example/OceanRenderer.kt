@@ -52,7 +52,7 @@ class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
     val width = ceil(spanX / SHORE_TEXEL_METRES).toInt()
     val height = ceil(spanZ / SHORE_TEXEL_METRES).toInt()
     val encoded = ShoreMap.bake(
-      width, height, world.minX, world.minZ, spanX, spanZ, seaLevel, world::baseTerrainHeightAt
+      width, height, world.minX, world.minZ, spanX, spanZ, seaLevel, world::seaFloorHeightAt
     )
 
     val pixmap = Pixmap(width, height, Pixmap.Format.RGBA8888)
@@ -112,8 +112,8 @@ class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
   }
 
   companion object {
-    /** Shore map resolution: one texel per this many metres (the world is ~1 km: 512 x 512 texels). */
-    private const val SHORE_TEXEL_METRES = 2f
+    /** Shore map resolution: one texel per this many metres (the world is ~1.4 km: 570 x 570 texels). */
+    private const val SHORE_TEXEL_METRES = 2.5f
 
     /**
      * Half the side of the plane. Larger than the far-plane corner distance of the camera frustum
