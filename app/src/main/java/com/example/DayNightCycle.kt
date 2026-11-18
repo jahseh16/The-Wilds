@@ -132,7 +132,7 @@ class DayNightCycle(
     blend(AMBIENT, from, to, t, ambientColor)
     fogDensity = FOG_DENSITY[from] + (FOG_DENSITY[to] - FOG_DENSITY[from]) * t
 
-    // Sun position on its arc. The 0.85 / 0.15 skew keeps the sun a little above the horizon at
+    // Sun position on its arc (computed first: the twilight below needs the elevation) The 0.85 / 0.15 skew keeps the sun a little above the horizon at
     // the DAWN and DUSK keyframes (warm low light) instead of exactly on it.
     val angle = timeOfDay * 2f * PI.toFloat()
     val elevation = (0.85f * sin(angle) + 0.15f).coerceIn(-1f, 1f)
@@ -144,6 +144,16 @@ class DayNightCycle(
     sunVisibility = smoothstep((sunElevation + 0.12f) / 0.20f)
     moonVisibility = smoothstep((0.02f - sunElevation) / 0.25f)
     starVisibility = smoothstep((0.10f - sunElevation) / 0.32f)
+
+    // Twilight follows the real sun: once it is well below the horizon the keyframe colours give way
+    // to the night ones, so no warm band lingers at the horizon in the middle of the night
+    val dark = smoothstep((-sunElevation - 0.10f) / 0.28f)
+    if (dark > 0f) {
+      skyColor.lerp(SKY[NIGHT_INDEX], dark)
+      fogColor.lerp(FOG[NIGHT_INDEX], dark)
+      ambientColor.lerp(AMBIENT[NIGHT_INDEX], dark)
+      fogDensity += (FOG_DENSITY[NIGHT_INDEX] - fogDensity) * dark
+    }
 
     if (sunElevation >= 0f) {
       val intensity = smoothstep(sunElevation / SUN_FULL_ELEVATION) * SUN_GAIN
@@ -171,6 +181,7 @@ class DayNightCycle(
 
   companion object {
     const val DEFAULT_CYCLE_SECONDS = 720f // 12 minutes
+    private const val NIGHT_INDEX = 3
 
     /**
      * Axis the sun's arc turns around (perpendicular to its path: east -> zenith, with the slight

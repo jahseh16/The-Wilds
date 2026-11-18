@@ -40,10 +40,10 @@ class ObjModelTest {
   @Test
   fun everyShippedModelParsesWithinItsTriangleBudget() {
     val budgets = mapOf(
-      "models/trees/tree_01.obj" to 2500, "models/props/rock_boulder_01.obj" to 1200,
+      "models/props/rock_boulder_01.obj" to 1200,
       "models/props/pebble_patch_01.obj" to 1200, "models/props/pebble_01.obj" to 200,
       "models/props/pebble_02.obj" to 200, "models/props/pebble_03.obj" to 200,
-      "models/props/stick_01.obj" to 200, "models/trees/tree_01_lod1.obj" to 600, "models/props/rock_boulder_01_lod1.obj" to 300, "models/props/stick_02.obj" to 200, "models/props/stick_03.obj" to 200
+      "models/props/stick_01.obj" to 200, "models/props/rock_boulder_01_lod1.obj" to 300, "models/props/stick_02.obj" to 200, "models/props/stick_03.obj" to 200
     )
     for ((path, budget) in budgets) {
       val m = ObjModel.parse(TestAssets.read(path))

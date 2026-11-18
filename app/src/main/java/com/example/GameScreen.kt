@@ -125,7 +125,7 @@ class GameScreen : Screen {
     // Atlases + models first: the populator must be listening before the first chunk loads
     solidAtlas = AtlasBuilder.build(Layer.SOLID)
     cutoutAtlas = AtlasBuilder.build(Layer.CUTOUT)
-    foliageShader = FoliageShader().apply { visual = this@GameScreen.visual; init() }
+    foliageShader = FoliageShader().apply { visual = this@GameScreen.visual; sky = skyRenderer.palette; init() }
     // Pine bark: its own repeating, normal-mapped texture pair (not in the atlas)
     barkColorTex = loadBarkTexture("models/trees/tree_01_bark_diff.jpg")
     barkNormalTex = loadBarkTexture("models/trees/tree_01_bark_nor.jpg")
@@ -160,7 +160,7 @@ class GameScreen : Screen {
     // Load the chunks around the spawn now so the ground is there on frame 1; the rest of the
     // streaming radius fills in one chunk per frame from render()
     chunkManager.prewarm(spawn)
-    oceanRenderer = OceanRenderer(chunkManager).apply { visual = this@GameScreen.visual }
+    oceanRenderer = OceanRenderer(chunkManager).apply { visual = this@GameScreen.visual; sky = skyRenderer.palette }
 
     flashlight = SpotLight().apply {
       set(
@@ -221,6 +221,7 @@ class GameScreen : Screen {
       gravelNormal = gravelNormalTex
     ).apply {
       visual = this@GameScreen.visual
+      sky = skyRenderer.palette
       init()
     }
 
@@ -285,6 +286,7 @@ class GameScreen : Screen {
       dayNight.skipToNextPhase()
     }
     dayNight.update(dt)
+    skyRenderer.update(dayNight, dt)
     dayNight.applyTo(environment, sunLight)
     terrainShader.fogDensity = dayNight.fogDensity
     // The streamed terrain melts into the fog before it ends, so the edge of the loaded area is never a cut
@@ -316,8 +318,6 @@ class GameScreen : Screen {
     Gdx.gl.glClearColor(clearColor[0], clearColor[1], clearColor[2], 1f)
     Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT or GL20.GL_DEPTH_BUFFER_BIT)
 
-    // Sun, moon and stars on top of the clear colour, before any geometry (no depth writes)
-    skyRenderer.render(camera, dayNight, dt)
 
     // Render 3D world with tri-planar normal-mapped shader & ground aim ring;
     // chunks outside the camera frustum are culled
@@ -328,7 +328,13 @@ class GameScreen : Screen {
     if (showDigRing) {
       modelBatch.render(chunkManager.aimIndicatorInstance)
     }
-    // The sea blends over the terrain, so ModelBatch draws it after every opaque renderable
+    modelBatch.end()
+
+    // Sky dome, stars and moon on the far plane: drawn after the opaque world so only the visible
+    // sky pixels are shaded (early depth test), and before the sea, which blends over them
+    skyRenderer.render(camera, dayNight)
+
+    modelBatch.begin(camera)
     oceanRenderer.render(modelBatch, environment)
     modelBatch.end()
 

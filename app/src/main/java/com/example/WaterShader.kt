@@ -62,6 +62,10 @@ class WaterShader(
 
   private val tmpDir = Vector3()
   private lateinit var gradeLocs: VisualGrade.Locations
+  private lateinit var glowLocs: SkyGlow.Locations
+
+  /** Atmosphere of this frame: the far sea fades into the sky's horizon colour. */
+  var sky: SkyPalette = SkyPalette()
 
   /** Live visual calibration (grade, sun / ambient multiplier, flashlight). */
   var visual: VisualSettings = VisualSettings()
@@ -111,6 +115,7 @@ class WaterShader(
     uSpotLightIntensityLoc = program.getUniformLocation("u_spotLightIntensity")
     uSpotLightCutoffLoc = program.getUniformLocation("u_spotLightCutoff")
     gradeLocs = VisualGrade.Locations(program, withSpot = true)
+    glowLocs = SkyGlow.Locations(program)
   }
 
   override fun compareTo(other: Shader): Int = if (other === this) 0 else -1
@@ -137,6 +142,7 @@ class WaterShader(
     program.setUniformf(uFarDistanceLoc, farDistance)
     program.setUniformf(uSkyColorLoc, skyColor.r, skyColor.g, skyColor.b)
     gradeLocs.apply(program, visual)
+    glowLocs.apply(program, sky)
   }
 
   override fun render(renderable: Renderable) {
@@ -333,8 +339,8 @@ void main() {
     // The plane is clipped by the camera far plane; be fully fogged before that happens
     mediump float farAmount = smoothstep(u_farDistance * 0.55, u_farDistance * 0.9, dist);
     fogAmount = max(fogAmount, farAmount);
-    // Fully faded water has exactly the clear colour, so the far edge of the sea meets the sky seamlessly
-    mediump vec3 fogTarget = mix(u_fogColor, u_skyColor, farAmount);
+    // Fully faded water has exactly the sky's horizon colour, so the far edge of the sea meets the dome seamlessly
+    mediump vec3 fogTarget = skyHorizon(-toCam / max(dist, 0.001), u_fogColor);
     if (fogAmount > 0.999) {
         fragColor = vec4(visualGrade(fogTarget), 1.0);
         return;
@@ -428,8 +434,8 @@ void main() {
 """
 
     private const val FRAGMENT_SHADER_ES30 =
-      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + SkyGlow.GLSL + FRAGMENT_BODY
     private const val FRAGMENT_SHADER_ES20 =
-      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + SkyGlow.GLSL + FRAGMENT_BODY
   }
 }

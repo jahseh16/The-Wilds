@@ -66,6 +66,10 @@ class TerrainShader(
   private val tmpDir = Vector3()
 
   private lateinit var gradeLocs: VisualGrade.Locations
+  private lateinit var glowLocs: SkyGlow.Locations
+
+  /** Atmosphere of this frame: the fog takes the sky's horizon colour (sunset glow included). */
+  var sky: SkyPalette = SkyPalette()
   private var uTerrainContrastLoc = -1
 
   /** Live visual calibration (grade, light multipliers, ground contrast / relief, flashlight). */
@@ -156,6 +160,7 @@ class TerrainShader(
     uSpotLightCutoffLoc = program.getUniformLocation("u_spotLightCutoff")
 
     gradeLocs = VisualGrade.Locations(program, withSpot = true)
+    glowLocs = SkyGlow.Locations(program)
     uTerrainContrastLoc = program.getUniformLocation("u_terrainContrast")
   }
 
@@ -188,6 +193,7 @@ class TerrainShader(
     program.setUniformf(uNormalStrengthLoc, NORMAL_MAP_STRENGTH * visual.normalStrength)
     program.setUniformf(uTerrainContrastLoc, visual.terrainContrast)
     gradeLocs.apply(program, visual)
+    glowLocs.apply(program, sky)
     program.setUniformf(uFogDensityLoc, fogDensity)
     program.setUniformf(uFadeRangeLoc, fadeStart, fadeEnd)
   }
@@ -695,15 +701,16 @@ void main() {
     mediump float fogAmount = clamp(1.0 - exp(-fogArg * fogArg), 0.0, 1.0);
     // Streamed-area edge: hazed out completely before the last chunk, never a visible cut
     fogAmount = max(fogAmount, smoothstep(u_fadeRange.x, u_fadeRange.y, camDist));
-    lighting = mix(lighting, u_fogColor, fogAmount);
+    HP vec3 viewDir = (v_worldPos - u_cameraPos) / max(camDist, 0.001);
+    lighting = mix(lighting, skyHorizon(viewDir, u_fogColor), fogAmount);
 
     fragColor = vec4(visualGrade(lighting), 1.0);
 }
 """
 
     private const val FRAGMENT_SHADER_ES30 =
-      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+      FRAGMENT_HEADER_ES30 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + SkyGlow.GLSL + FRAGMENT_BODY
     private const val FRAGMENT_SHADER_ES20 =
-      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + FRAGMENT_BODY
+      FRAGMENT_HEADER_ES20 + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + SkyGlow.GLSL + FRAGMENT_BODY
   }
 }

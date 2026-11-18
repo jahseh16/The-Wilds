@@ -43,6 +43,10 @@ class FoliageShader : Shader {
   private val loc = HashMap<String, Int>()
   private val tmpDir = Vector3()
   private lateinit var gradeLocs: VisualGrade.Locations
+  private lateinit var glowLocs: SkyGlow.Locations
+
+  /** Atmosphere of this frame: the fog takes the sky's horizon colour. */
+  var sky: SkyPalette = SkyPalette()
 
   /** Live visual calibration (grade, sun / ambient multiplier, flashlight). */
   var visual: VisualSettings = VisualSettings()
@@ -62,6 +66,7 @@ class FoliageShader : Shader {
     // Samplers: the diffuse is always on its own unit, the bark normal map on another
 
     gradeLocs = VisualGrade.Locations(program, withSpot = true)
+    glowLocs = SkyGlow.Locations(program)
   }
 
   private fun u(name: String): Int = loc.getValue(name)
@@ -83,6 +88,7 @@ class FoliageShader : Shader {
     program.setUniformf(u("u_fadeRange"), fadeStart, fadeEnd)
     program.setUniformf(u("u_smallFade"), smallFadeStart, smallFadeEnd)
     gradeLocs.apply(program, visual)
+    glowLocs.apply(program, sky)
     textureBinder = context.textureBinder
   }
 
@@ -238,7 +244,7 @@ uniform mediump float u_spotLightIntensity;
 uniform mediump float u_spotLightCutoff;
 
 const mediump vec3 LUMA = vec3(0.30, 0.59, 0.11);
-""" + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + """
+""" + VisualGrade.GLSL + VisualGrade.SPOT_GLSL + SkyGlow.GLSL + """
 // Cut wood: pale sapwood, darker heartwood rings, a thin bark rim. (x, y) on the unit disc.
 mediump vec3 woodRings(mediump vec2 d) {
     mediump float r = length(d);
@@ -305,7 +311,8 @@ void main() {
     HP float fogArg = camDist * u_fogDensity;
     mediump float fogAmount = clamp(1.0 - exp(-fogArg * fogArg), 0.0, 1.0);
     fogAmount = max(fogAmount, smoothstep(u_fadeRange.x, u_fadeRange.y, camDist));
-    gl_FragColor = vec4(visualGrade(mix(lighting, u_fogColor, fogAmount)), 1.0);
+    HP vec3 viewDir = (v_pos - u_cameraPos) / max(camDist, 0.001);
+    gl_FragColor = vec4(visualGrade(mix(lighting, skyHorizon(viewDir, u_fogColor), fogAmount)), 1.0);
 }
 """
   }

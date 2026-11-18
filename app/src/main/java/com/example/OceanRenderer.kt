@@ -41,6 +41,11 @@ class OceanRenderer(world: ChunkManager) : Disposable, RenderableProvider {
     get() = shader.visual
     set(value) { shader.visual = value }
 
+  /** Atmosphere of the frame, forwarded to the water shader (horizon haze colour). */
+  var sky: SkyPalette
+    get() = shader.sky
+    set(value) { shader.sky = value }
+
   init {
     val spanX = world.maxX - world.minX
     val spanZ = world.maxZ - world.minZ

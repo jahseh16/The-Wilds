@@ -6,7 +6,7 @@ import org.junit.Assume
 /** Finds `app/src/main/assets` whatever the working directory of the test runner is. */
 object TestAssets {
   private val root: File? = listOfNotNull(System.getProperty("assets.dir"), "src/main/assets", "app/src/main/assets")
-    .map { File(it) }.firstOrNull { File(it, "models/trees/tree_01.obj").exists() }
+    .map { File(it) }.firstOrNull { File(it, "models/trees/tree_01_bark_diff.jpg").exists() }
 
   fun available(): Boolean = root != null
 
