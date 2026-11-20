@@ -1,5 +1,6 @@
 package com.example
 
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -476,6 +477,49 @@ class IslandTerrain(
   }
 
   /**
+   * Height of the water surface over (x, z): the level of the lake whose water covers the point, or sea
+   * level where the ground is below the sea, or [Float.NaN] on dry ground. Used for splashes and wading.
+   */
+  fun waterLevelAt(x: Float, z: Float): Float {
+    val h = heightAt(x, z)
+    for (l in lakes) {
+      val dx = x - l.x; val dz = z - l.z
+      val e = l.waterExtent
+      if (dx * dx + dz * dz < e * e) return if (h < l.level + 0.12f) l.level else Float.NaN
+    }
+    return if (h < seaLevel) seaLevel else Float.NaN
+  }
+
+  /**
+   * Distance in metres from (x, z) to the nearest sea water, searched along 16 rays out to [maxDistance]
+   * (returns [maxDistance] if none is hit). 0 when standing in the sea. Cheap enough to call a few times a second.
+   */
+  fun seaDistanceAt(x: Float, z: Float, maxDistance: Float = 240f): Float {
+    if (heightAt(x, z) < seaLevel && !inLakeBasin(x, z)) return 0f
+    var best = maxDistance
+    for (k in 0 until 16) {
+      val a = k * (2f * PI.toFloat() / 16f)
+      val ux = cos(a); val uz = sin(a)
+      var d = SEA_RAY_STEP
+      while (d < best) {
+        val px = x + ux * d; val pz = z + uz * d
+        if (heightAt(px, pz) < seaLevel && !inLakeBasin(px, pz)) { best = d; break }
+        d += SEA_RAY_STEP
+      }
+    }
+    return best
+  }
+
+  private fun inLakeBasin(x: Float, z: Float): Boolean {
+    for (l in lakes) {
+      val dx = x - l.x; val dz = z - l.z
+      val e = l.radius * l.bankEnd
+      if (dx * dx + dz * dz < e * e) return true
+    }
+    return false
+  }
+
+  /**
    * Height as the SEA sees it: the lake basins (and the sinkhole) are inland land, so even a bed that
    * dips below sea level never fills with sea water. Used to bake the sea's shore map.
    */
@@ -611,6 +655,7 @@ class IslandTerrain(
     const val REFERENCE_RADIUS = 700f
 
     /** Sea floor depth under the sea level, in metres. */
+    private const val SEA_RAY_STEP = 12f
     const val SEABED_DEPTH = 7f
 
     /** Height of the top of the beach above sea level; the hills start from here. */

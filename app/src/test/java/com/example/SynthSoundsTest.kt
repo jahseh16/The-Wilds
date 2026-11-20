@@ -104,4 +104,40 @@ class SynthSoundsTest {
     // the thud is dark (mostly low frequencies), the chop bright
     assertTrue(brightness(thud) < brightness(chop))
   }
+
+  @Test
+  fun waterLandingRustleAndPickupFallbacksAreShortAudibleAndDeterministic() {
+    val shorts = mapOf(
+      "splash" to SynthSounds.splash(0), "land" to SynthSounds.land(0),
+      "rustle" to SynthSounds.leavesRustle(0), "pickup" to SynthSounds.pickupLog()
+    )
+    for ((name, pcm) in shorts) {
+      assertTrue("$name under 2 s", pcm.size < SynthSounds.SAMPLE_RATE * 2)
+      assertTrue("$name audible", rms(pcm) > 300)
+      assertTrue("$name no clipping", peak(pcm) < Short.MAX_VALUE.toInt())
+    }
+    assertArrayEquals(SynthSounds.splash(1), SynthSounds.splash(1))
+    assertTrue(!SynthSounds.splash(0).contentEquals(SynthSounds.splash(1)))
+    assertTrue(!SynthSounds.land(0).contentEquals(SynthSounds.land(1)))
+    // a landing is a dark thump, the splash and the rustle are brighter
+    assertTrue(brightness(SynthSounds.land(0)) < brightness(SynthSounds.leavesRustle(0)))
+  }
+
+  @Test
+  fun ambientLoopsAreAudibleSeamlessAndTheRightLength() {
+    val loops = mapOf(
+      "waves" to SynthSounds.waves(), "lake" to SynthSounds.lake(),
+      "birds" to SynthSounds.birds(), "crickets" to SynthSounds.crickets()
+    )
+    for ((name, pcm) in loops) {
+      assertTrue("$name is at least 5 s", pcm.size >= SynthSounds.SAMPLE_RATE * 5)
+      assertTrue("$name audible (rms=${rms(pcm)})", rms(pcm) > 400)
+      var maxStep = 0
+      for (i in 1 until pcm.size) maxStep = maxOf(maxStep, abs(pcm[i] - pcm[i - 1]))
+      val seam = abs(pcm[0] - pcm[pcm.size - 1])
+      assertTrue("$name seam $seam <= $maxStep", seam <= maxStep)
+    }
+    // birds are high-pitched, the surf is a low rumble
+    assertTrue(brightness(SynthSounds.birds()) > brightness(SynthSounds.waves()) * 3)
+  }
 }

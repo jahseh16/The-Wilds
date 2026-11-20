@@ -101,7 +101,7 @@ object SynthSounds {
   }
 
   /** What the player is walking on: picks the timbre of the footstep. */
-  enum class Surface { FOREST, GRASS, SAND, ROCK }
+  enum class Surface { FOREST, GRASS, SAND, ROCK, WATER }
 
   /**
    * One footstep on [surface]; [variant] (0..2) changes the seed and the tuning slightly so a walk
@@ -114,7 +114,7 @@ object SynthSounds {
   fun footstep(surface: Surface, variant: Int): ShortArray {
     val rng = Random(9001 + surface.ordinal * 31 + variant * 7)
     val tune = 1f + (variant - 1) * 0.07f
-    val dur = when (surface) { Surface.SAND -> 0.26f; Surface.FOREST -> 0.22f; Surface.ROCK -> 0.16f; Surface.GRASS -> 0.20f }
+    val dur = when (surface) { Surface.SAND -> 0.26f; Surface.FOREST -> 0.22f; Surface.ROCK -> 0.16f; Surface.GRASS -> 0.20f; Surface.WATER -> 0.30f }
     val n = (SAMPLE_RATE * dur).toInt()
     val out = ShortArray(n)
     var lp = 0f; var lp2 = 0f; var phase = 0f; var crackle = 0f
@@ -145,6 +145,11 @@ object SynthSounds {
           val knock = sin(phase) * exp(-t * 60f) * 0.45f + sin(phase * 2.71f) * exp(-t * 80f) * 0.30f
           val click = (noise - lp) * exp(-t * 200f) * 1.3f
           knock + click + (noise - lp) * exp(-t * 30f) * 0.08f
+        }
+        Surface.WATER -> {
+          // a shallow plash: wet low-passed noise plus a short bubble that rises in pitch
+          val bubble = sin(2f * PI.toFloat() * (260f * tune + 900f * t) * t) * exp(-t * 28f) * 0.35f
+          lp * exp(-t * 14f) * 0.65f + (noise - lp) * exp(-t * 24f) * 0.20f + bubble
         }
       }
       val attack = (t / 0.002f).coerceAtMost(1f)
@@ -233,6 +238,201 @@ object SynthSounds {
       val attack = (t / 0.004f).coerceAtMost(1f)
       out[i] = toPcm((boom + rumble + crash) * attack * 0.9f)
     }
+    return out
+  }
+
+
+  // --- Water, landing, rustle and the ambient layers (fallbacks for assets/sounds/*.ogg) ----------
+
+  /** Splash of a body entering the water: a burst of wet noise, a deep gulp and a few rising bubbles. */
+  fun splash(variant: Int): ShortArray {
+    val rng = Random(5150 + variant * 13)
+    val n = (SAMPLE_RATE * 0.60f).toInt()
+    val out = ShortArray(n)
+    var lp = 0f; var lp2 = 0f; var phase = 0f
+    for (i in 0 until n) {
+      val t = i.toFloat() / SAMPLE_RATE
+      val noise = rng.nextFloat() * 2f - 1f
+      lp += 0.30f * (noise - lp)
+      lp2 += 0.07f * (noise - lp2)
+      phase += 2f * PI.toFloat() * (110f - 40f * t) / SAMPLE_RATE
+      val gulp = sin(phase) * exp(-t * 9f) * 0.5f
+      val spray = (noise - lp) * exp(-t * 7f) * 0.35f
+      val bubbles = sin(2f * PI.toFloat() * (500f + 1500f * (t * (3f + variant)) % 1f) * t) *
+        exp(-((t * (6f + variant)) % 1f) * 14f) * exp(-t * 4f) * 0.12f
+      out[i] = toPcm(((lp2 * 1.4f + lp * 0.35f) * exp(-t * 6f) + spray + gulp + bubbles) * (t / 0.004f).coerceAtMost(1f) * 0.85f)
+    }
+    normalize(out, 0.8f)
+    return out
+  }
+
+  /** Heavy landing of a jump: a short low thump with a little dirt. */
+  fun land(variant: Int): ShortArray {
+    val rng = Random(3030 + variant * 17)
+    val n = (SAMPLE_RATE * 0.35f).toInt()
+    val out = ShortArray(n)
+    var lp = 0f; var phase = 0f
+    for (i in 0 until n) {
+      val t = i.toFloat() / SAMPLE_RATE
+      lp += 0.18f * ((rng.nextFloat() * 2f - 1f) - lp)
+      phase += 2f * PI.toFloat() * (48f + 70f * exp(-t * 20f) + variant * 6f) / SAMPLE_RATE
+      out[i] = toPcm((sin(phase) * exp(-t * 12f) * 0.8f + lp * exp(-t * 18f) * 0.5f) * (t / 0.002f).coerceAtMost(1f))
+    }
+    normalize(out, 0.8f)
+    return out
+  }
+
+  /** Short dry knock when a log is lifted: the chop with its attack softened. */
+  fun pickupLog(): ShortArray {
+    val pcm = chop(2)
+    val n = (SAMPLE_RATE * 0.22f).toInt().coerceAtMost(pcm.size)
+    val out = pcm.copyOf(n)
+    for (i in out.indices) out[i] = (out[i] * (1f - i.toFloat() / n).coerceAtLeast(0f)).toInt().toShort()
+    return out
+  }
+
+  /** Vegetation brushing past the body: band-limited noise with a few random swells. */
+  fun leavesRustle(variant: Int): ShortArray {
+    val rng = Random(8080 + variant * 19)
+    val n = (SAMPLE_RATE * 0.45f).toInt()
+    val out = ShortArray(n)
+    var lp = 0f; var env = 0f
+    for (i in 0 until n) {
+      val t = i.toFloat() / SAMPLE_RATE
+      val noise = rng.nextFloat() * 2f - 1f
+      lp += 0.5f * (noise - lp)
+      if (rng.nextFloat() < 0.0035f) env = 0.7f + rng.nextFloat() * 0.5f
+      env *= 0.9994f
+      val swell = sin(PI.toFloat() * t / 0.45f)
+      out[i] = toPcm((noise - lp) * (0.25f + env) * swell * 0.6f)
+    }
+    normalize(out, 0.6f)
+    return out
+  }
+
+  /** Makes a noise buffer of [n] samples loop seamlessly by blending its extra tail into its head. */
+  private fun seamless(raw: FloatArray, n: Int, fade: Int): FloatArray {
+    val loop = FloatArray(n)
+    for (i in 0 until n) {
+      loop[i] = if (i < fade) {
+        val w = i.toFloat() / fade
+        val sm = w * w * (3f - 2f * w)
+        raw[n + i] * (1f - sm) + raw[i] * sm
+      } else raw[i]
+    }
+    return loop
+  }
+
+  /** Surf: low-passed noise swelling in and out (whole number of swells), hissing on the crests. */
+  fun waves(seconds: Float = 10f): ShortArray {
+    val rng = Random(2468)
+    val n = (SAMPLE_RATE * seconds).toInt()
+    val fade = (SAMPLE_RATE * 1.0f).toInt()
+    val raw = FloatArray(n + fade)
+    var a = 0f; var b = 0f; var hi = 0f
+    for (i in raw.indices) {
+      val noise = rng.nextFloat() * 2f - 1f
+      a += 0.045f * (noise - a)
+      b += 0.050f * (a - b)
+      hi += 0.35f * (noise - hi)
+      raw[i] = b * 4f + (noise - hi) * 0.10f
+    }
+    val loop = seamless(raw, n, fade)
+    val out = ShortArray(n)
+    for (i in 0 until n) {
+      val t = i.toFloat() / n
+      val swell = 0.5f + 0.5f * sin(2f * PI.toFloat() * 2f * t - 1.2f)
+      val env = 0.22f + 0.78f * swell * swell
+      out[i] = toPcm(loop[i] * env * 0.95f)
+    }
+    normalize(out, 0.8f)
+    return out
+  }
+
+  /** Calm lake water: a faint low-passed ripple bed with sparse "plip" droplets. */
+  fun lake(seconds: Float = 8f): ShortArray {
+    val rng = Random(1357)
+    val n = (SAMPLE_RATE * seconds).toInt()
+    val fade = (SAMPLE_RATE * 0.8f).toInt()
+    val raw = FloatArray(n + fade)
+    var a = 0f; var b = 0f
+    for (i in raw.indices) {
+      a += 0.12f * ((rng.nextFloat() * 2f - 1f) - a)
+      b += 0.35f * (a - b)
+      raw[i] = (a - b) * 0.5f + b * 0.15f
+    }
+    val loop = seamless(raw, n, fade)
+    val buf = FloatArray(n)
+    for (i in 0 until n) buf[i] = loop[i] * (0.6f + 0.4f * sin(2f * PI.toFloat() * 3f * i / n))
+    val drops = (seconds * 0.9f).toInt()
+    repeat(drops) {
+      val start = (rng.nextFloat() * (n - SAMPLE_RATE * 0.2f)).toInt()
+      val f0 = 380f + rng.nextFloat() * 500f
+      val amp = 0.25f + rng.nextFloat() * 0.35f
+      for (j in 0 until (SAMPLE_RATE * 0.12f).toInt()) {
+        val t = j.toFloat() / SAMPLE_RATE
+        buf[start + j] += sin(2f * PI.toFloat() * (f0 + 2400f * t) * t) * exp(-t * 38f) * amp * 0.35f
+      }
+    }
+    val out = ShortArray(n)
+    for (i in 0 until n) out[i] = toPcm(buf[i])
+    normalize(out, 0.6f)
+    return out
+  }
+
+  /** Daytime birdsong: several species of rising / falling chirps scattered over the loop (silence at both ends). */
+  fun birds(seconds: Float = 12f): ShortArray {
+    val rng = Random(9753)
+    val n = (SAMPLE_RATE * seconds).toInt()
+    val buf = FloatArray(n)
+    val calls = (seconds * 0.75f).toInt()
+    repeat(calls) {
+      val base = 2600f + rng.nextFloat() * 2600f
+      val notes = 2 + rng.nextInt(4)
+      val rising = rng.nextBoolean()
+      val gap = 0.07f + rng.nextFloat() * 0.06f
+      val amp = 0.25f + rng.nextFloat() * 0.5f
+      val start = (SAMPLE_RATE * 0.1f + rng.nextFloat() * (n - SAMPLE_RATE * 1.2f)).toInt()
+      for (k in 0 until notes) {
+        val noteStart = start + (k * gap * SAMPLE_RATE).toInt()
+        val len = (SAMPLE_RATE * 0.06f).toInt()
+        var phase = 0f
+        for (j in 0 until len) {
+          if (noteStart + j >= n) break
+          val t = j.toFloat() / len
+          val f = base * (1f + (if (rising) 0.35f else -0.25f) * t) + 140f * k
+          phase += 2f * PI.toFloat() * f / SAMPLE_RATE
+          val env = sin(PI.toFloat() * t)
+          buf[noteStart + j] += sin(phase) * env * env * amp
+        }
+      }
+    }
+    val out = ShortArray(n)
+    for (i in 0 until n) out[i] = toPcm(buf[i])
+    normalize(out, 0.55f)
+    return out
+  }
+
+  /** Night crickets: two detuned pulse trains; both periods divide [seconds] so the loop is exactly periodic. */
+  fun crickets(seconds: Float = 6f): ShortArray {
+    val n = (SAMPLE_RATE * seconds).toInt()
+    val out = ShortArray(n)
+    val voices = listOf(Triple(4300f, 0.5f, 0.9f), Triple(4750f, 0.6f, 0.7f), Triple(3900f, 0.75f, 0.5f))
+    for (i in 0 until n) {
+      val t = i.toFloat() / SAMPLE_RATE
+      var sum = 0f
+      for ((freq, period, amp) in voices) {
+        val tp = t % period
+        // 4 pulses of 14 ms, 30 ms apart, at the start of each period
+        val pulse = tp % 0.03f
+        if (tp < 4 * 0.03f && pulse < 0.014f) {
+          val e = sin(PI.toFloat() * pulse / 0.014f)
+          sum += sin(2f * PI.toFloat() * freq * t) * e * amp
+        }
+      }
+      out[i] = toPcm(sum * 0.4f)
+    }
+    normalize(out, 0.5f)
     return out
   }
 

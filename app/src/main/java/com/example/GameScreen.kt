@@ -102,6 +102,9 @@ class GameScreen : Screen {
   private var isGrounded: Boolean = false
   private var currentEyeHeight: Float = STAND_EYE_HEIGHT
   private var isActuallyCrawling: Boolean = false
+  private lateinit var ambience: Ambience
+  private var wasInWater = false
+  private var wasCrawling = false
 
   // First-person camera orientation in degrees
   private var yawDegrees: Float = 0f
@@ -152,8 +155,14 @@ class GameScreen : Screen {
       ground = { x, z -> chunkManager.terrain.heightAt(x, z) },
       sounds = soundManager
     )
-    playerController.stepListener = PlayerController.StepListener { intensity, _ ->
-      soundManager.playFootstep(surfaceUnderPlayer(), intensity, isActuallyCrawling)
+    ambience = Ambience(chunkManager.terrain)
+    playerController.stepListener = PlayerController.StepListener { intensity, landing ->
+      val surface = surfaceUnderPlayer()
+      when {
+        landing && surface == SynthSounds.Surface.WATER -> soundManager.playSplash(intensity)
+        landing -> soundManager.playLand(intensity)
+        else -> soundManager.playFootstep(surface, intensity, isActuallyCrawling)
+      }
     }
     playerX = spawn.x
     playerZ = spawn.z
@@ -249,9 +258,30 @@ class GameScreen : Screen {
       setFilter(Texture.TextureFilter.MipMapLinearLinear, Texture.TextureFilter.Linear)
     }
 
+  /** Water contact (splash on entering, wading steps), crouch rustle and the ambient layers. */
+  private fun updateAudio(dt: Float) {
+    val inWater = water(chunkManager.terrain)
+    if (inWater && !wasInWater && landingSpeedThisFrame <= 0f) {
+      // walked or fell in (a landing already splashes through the step listener)
+      soundManager.playSplash(0.4f + (-verticalVelocity / 8f).coerceIn(0f, 1f))
+    }
+    wasInWater = inWater
+    if (isActuallyCrawling && !wasCrawling) soundManager.playCrouch(surfaceUnderPlayer())
+    wasCrawling = isActuallyCrawling
+    ambience.update(dt, playerX, playerZ, playerFeetY, dayNight.sunElevation)
+    soundManager.update(camera.position, dt, ambience.state)
+  }
+
+  /** True when the player's feet are in more than a hand's depth of water (sea or lake). */
+  private fun water(t: IslandTerrain): Boolean {
+    val level = t.waterLevelAt(playerX, playerZ)
+    return !level.isNaN() && level - playerFeetY > WADE_DEPTH
+  }
+
   /** Footstep timbre from the ground under the player: leaf litter, meadow, beach sand or rock. */
   private fun surfaceUnderPlayer(): SynthSounds.Surface {
     val t = chunkManager.terrain
+    if (water(t)) return SynthSounds.Surface.WATER
     // Inside a dug tunnel the floor is bare earth / rock
     if (playerFeetY < t.heightAt(playerX, playerZ) - 1.2f) return SynthSounds.Surface.ROCK
     t.biomeAt(playerX, playerZ, surfaceBiome)
@@ -307,7 +337,7 @@ class GameScreen : Screen {
     landingSpeedThisFrame = 0f
     updatePlayerPhysics(dt)
     applyBodyFeel(dt)
-    soundManager.update(camera.position)
+    updateAudio(dt)
     oceanRenderer.update(dt, camera.position, dayNight.fogDensity, camera.far, dayNight.skyColor)
     lakeRenderer.update(dt, dayNight.fogDensity, camera.far)
     updateFlashlight()
@@ -856,6 +886,7 @@ class GameScreen : Screen {
     const val MOVE_SPEED = 5.5f
     const val GRAVITY = -22f
     const val JUMP_VELOCITY = 8.2f
+    const val WADE_DEPTH = 0.06f
     const val TERRAIN_EDGE_MARGIN = 1.0f
     const val LOOK_SENSITIVITY = 0.22f
     const val MIN_PITCH = -85f
